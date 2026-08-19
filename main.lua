@@ -7,6 +7,8 @@ local CoreGui = game:GetService("CoreGui")
 local RAW_URL = "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"
 local SETTINGS_FILE = "ServerFinderConfig.json"
 
+local isHopping = false -- Флаг защиты от повторных краш-вызовов
+
 local function setQueue()
     local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if q then
@@ -156,12 +158,11 @@ local function updateBtnText()
 end
 updateBtnText()
 
--- Подсчет сообщений ТОЛЬКО от живых игроков
 local chatMessageCount = 0
 
 pcall(function()
     TextChatService.MessageReceived:Connect(function(msg)
-        if msg and msg.TextSource then -- TextSource есть только у обычных игроков
+        if msg and msg.TextSource then
             chatMessageCount = chatMessageCount + 1
         end
     end)
@@ -216,41 +217,56 @@ local function renderPlayers()
 end
 
 local function executeHop()
+    if isHopping then return end
+    isHopping = true
+
+    SearchBtn.Text = "[ HOPPING... ]"
     setQueue()
-    
+
     local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
-    if not httpRequest then return end
+    local targetServer = nil
 
-    local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100", game.PlaceId)
-    local success, res = pcall(function() return httpRequest({Url = url, Method = "GET"}) end)
+    if httpRequest then
+        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100", game.PlaceId)
+        local success, res = pcall(function() return httpRequest({Url = url, Method = "GET"}) end)
 
-    if success and res and res.Body then
-        local data = HttpService:JSONDecode(res.Body)
-        if data and data.data then
-            local valid = {}
-            for _, s in ipairs(data.data) do
-                if s.playing < s.maxPlayers and s.id ~= game.JobId then
-                    table.insert(valid, s.id)
+        if success and res and res.Body then
+            local decSuccess, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if decSuccess and data and data.data then
+                local valid = {}
+                for _, s in ipairs(data.data) do
+                    if type(s) == "table" and s.playing and s.maxPlayers and s.playing < s.maxPlayers and s.id ~= game.JobId then
+                        table.insert(valid, s.id)
+                    end
+                end
+                if #valid > 0 then
+                    targetServer = valid[math.random(1, #valid)]
                 end
             end
-            if #valid > 0 then
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, valid[math.random(1, #valid)], Players.LocalPlayer)
-            else
-                task.wait(3)
-                executeHop()
-            end
-        else
-            task.wait(3)
-            executeHop()
         end
+    end
+
+    -- Если смогли найти конкретный сервер через API
+    if targetServer then
+        local tpSuccess = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer, Players.LocalPlayer)
+        end)
+        
+        -- Таймаут-фоллбэк: если за 5 секунд телепорт не произошел, делаем случайный хоп
+        task.delay(5, function()
+            if isHopping then
+                pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
+            end
+        end)
     else
-        task.wait(3)
-        executeHop()
+        -- Фоллбэк: если API Роблокса заблокировал запросы, прыгаем рандомно
+        pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
     end
 end
 
 TeleportService.TeleportInitFailed:Connect(function()
-    task.wait(2)
+    isHopping = false
+    task.wait(1.5)
     if config.AutoHop then
         executeHop()
     end
@@ -284,7 +300,7 @@ local function evaluateServer()
         saveSettings(config)
     else
         SearchBtn.Text = "[ NOT MATCHED. NEXT... ]"
-        task.wait(1)
+        task.wait(0.5)
         executeHop()
     end
 end
