@@ -209,25 +209,32 @@ local MUTED = Color3.fromRGB(120, 120, 120)
 
 local function setupRetroButton(button)
     local origSize = button.Size
+    local isImage = button:IsA("ImageButton")
 
     button.MouseEnter:Connect(function()
         if not guiAlive or not button.Parent then
             return
         end
-        TweenService:Create(button, TweenInfo.new(0.12), {
-            BackgroundColor3 = WHITE,
-            TextColor3 = BLACK,
-        }):Play()
+        local props = { BackgroundColor3 = WHITE }
+        if isImage then
+            props.ImageColor3 = BLACK
+        else
+            props.TextColor3 = BLACK
+        end
+        TweenService:Create(button, TweenInfo.new(0.12), props):Play()
     end)
 
     button.MouseLeave:Connect(function()
         if not guiAlive or not button.Parent then
             return
         end
-        TweenService:Create(button, TweenInfo.new(0.12), {
-            BackgroundColor3 = BLACK,
-            TextColor3 = WHITE,
-        }):Play()
+        local props = { BackgroundColor3 = BLACK }
+        if isImage then
+            props.ImageColor3 = WHITE
+        else
+            props.TextColor3 = WHITE
+        end
+        TweenService:Create(button, TweenInfo.new(0.12), props):Play()
     end)
 
     button.MouseButton1Down:Connect(function()
@@ -249,6 +256,165 @@ local function setupRetroButton(button)
     end)
 end
 
+local windowZ = 2
+
+local function raiseWindow(frame)
+    if not frame or not frame.Parent then
+        return
+    end
+    windowZ = windowZ + 1
+    frame.ZIndex = windowZ
+end
+
+local function makeDraggable(frame, handle)
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            raiseWindow(frame)
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or not guiAlive then
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function pulseBorder(frame)
+    task.spawn(function()
+        while guiAlive and frame.Parent do
+            if frame.Visible then
+                TweenService:Create(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED }):Play()
+            end
+            task.wait(1.2)
+            if not (guiAlive and frame.Parent) then
+                break
+            end
+            if frame.Visible then
+                TweenService:Create(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = WHITE }):Play()
+            end
+            task.wait(1.2)
+        end
+    end)
+end
+
+local function createWindow(opts)
+    local win = Instance.new("Frame")
+    win.Name = opts.Name
+    win.Size = opts.Size
+    win.Position = opts.Position
+    win.BackgroundColor3 = BLACK
+    win.BorderSizePixel = 1
+    win.BorderColor3 = WHITE
+    win.Active = true
+    win.Visible = false
+    win.ClipsDescendants = true
+    win.ZIndex = 2
+    win.Parent = ScreenGui
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 30)
+    titleBar.BackgroundTransparency = 1
+    titleBar.Parent = win
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -36, 1, 0)
+    title.Position = UDim2.new(0, 8, 0, 0)
+    title.Text = opts.Title
+    title.TextColor3 = WHITE
+    title.Font = Enum.Font.Code
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.BackgroundTransparency = 1
+    title.Parent = titleBar
+
+    local close = Instance.new("TextButton")
+    close.Size = UDim2.new(0, 20, 0, 20)
+    close.Position = UDim2.new(1, -25, 0, 5)
+    close.BackgroundColor3 = BLACK
+    close.BorderSizePixel = 1
+    close.BorderColor3 = WHITE
+    close.Text = "X"
+    close.TextColor3 = WHITE
+    close.Font = Enum.Font.Code
+    close.TextSize = 12
+    close.AutoButtonColor = false
+    close.Parent = win
+    setupRetroButton(close)
+
+    local body = Instance.new("Frame")
+    body.Name = "Body"
+    body.Size = UDim2.new(1, 0, 1, -30)
+    body.Position = UDim2.new(0, 0, 0, 30)
+    body.BackgroundTransparency = 1
+    body.Parent = win
+
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, 0, 0)
+    line.BackgroundColor3 = WHITE
+    line.BorderSizePixel = 0
+    line.Parent = body
+
+    makeDraggable(win, titleBar)
+    pulseBorder(win)
+
+    win.InputBegan:Connect(function()
+        raiseWindow(win)
+    end)
+
+    close.MouseButton1Click:Connect(function()
+        win.Visible = false
+    end)
+
+    local function show()
+        win.Visible = true
+        raiseWindow(win)
+        win.BackgroundTransparency = 1
+        TweenService:Create(win, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 0,
+        }):Play()
+    end
+
+    return {
+        Frame = win,
+        Body = body,
+        show = show,
+        hide = function()
+            win.Visible = false
+        end,
+        toggle = function()
+            if win.Visible then
+                win.Visible = false
+            else
+                show()
+            end
+        end,
+    }
+end
+
 local EXPANDED_SIZE = UDim2.new(0, 340, 0, 540)
 local MINIMIZED_SIZE = UDim2.new(0, 340, 0, 32)
 
@@ -264,63 +430,21 @@ Main.ClipsDescendants = true
 Main.Parent = ScreenGui
 
 Main.BackgroundTransparency = 1
+Main.ZIndex = 1
 TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
     BackgroundTransparency = 0,
 }):Play()
+pulseBorder(Main)
 
-task.spawn(function()
-    while guiAlive and Main.Parent do
-        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED }):Play()
-        task.wait(1.2)
-        if not (guiAlive and Main.Parent) then
-            break
-        end
-        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = WHITE }):Play()
-        task.wait(1.2)
-    end
-end)
-
--- Перетаскивание за шапку (без устаревшего Frame.Draggable)
 local TitleBar = Instance.new("Frame")
 TitleBar.Name = "TitleBar"
 TitleBar.Size = UDim2.new(1, 0, 0, 30)
 TitleBar.BackgroundTransparency = 1
 TitleBar.Parent = Main
-
-local dragging = false
-local dragStart = nil
-local startPos = nil
-
-TitleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = Main.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-    if not dragging then
-        return
-    end
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        local delta = input.Position - dragStart
-        Main.Position = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
-    end
-end)
+makeDraggable(Main, TitleBar)
 
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -92, 1, 0)
+Title.Size = UDim2.new(1, -118, 1, 0)
 Title.Position = UDim2.new(0, 8, 0, 0)
 Title.Text = "[ SERVER FINDER ]"
 Title.TextColor3 = WHITE
@@ -347,7 +471,24 @@ local function makeHeaderButton(text, xOffset)
     return btn
 end
 
-local MinBtn = makeHeaderButton("_", -72)
+local function makeHeaderImageButton(imageId, xOffset)
+    local btn = Instance.new("ImageButton")
+    btn.Size = UDim2.new(0, 20, 0, 20)
+    btn.Position = UDim2.new(1, xOffset, 0, 5)
+    btn.BackgroundColor3 = BLACK
+    btn.BorderSizePixel = 1
+    btn.BorderColor3 = WHITE
+    btn.Image = "rbxassetid://" .. tostring(imageId)
+    btn.ImageColor3 = WHITE
+    btn.ScaleType = Enum.ScaleType.Fit
+    btn.AutoButtonColor = false
+    btn.Parent = Main
+    setupRetroButton(btn)
+    return btn
+end
+
+local MinBtn = makeHeaderButton("_", -97)
+local SettingsBtn = makeHeaderImageButton(5912368781, -75)
 local InfoBtn = makeHeaderButton("?", -50)
 local CloseBtn = makeHeaderButton("X", -25)
 
@@ -375,117 +516,6 @@ MinBtn.MouseButton1Click:Connect(function()
         TweenService:Create(Main, TweenInfo.new(0.15), { Size = EXPANDED_SIZE }):Play()
         MinBtn.Text = "_"
     end
-end)
-
-local InfoOverlay = Instance.new("Frame")
-InfoOverlay.Name = "InfoOverlay"
-InfoOverlay.Size = UDim2.new(1, 0, 1, 0)
-InfoOverlay.Position = UDim2.new(0, 0, 0, 0)
-InfoOverlay.BackgroundColor3 = BLACK
-InfoOverlay.BorderSizePixel = 1
-InfoOverlay.BorderColor3 = WHITE
-InfoOverlay.Visible = false
-InfoOverlay.ZIndex = 10
-InfoOverlay.Parent = Main
-
-local InfoTitle = Instance.new("TextLabel")
-InfoTitle.Size = UDim2.new(1, -35, 0, 30)
-InfoTitle.Position = UDim2.new(0, 8, 0, 0)
-InfoTitle.Text = "[ DOCUMENTATION & INFO ]"
-InfoTitle.TextColor3 = WHITE
-InfoTitle.Font = Enum.Font.Code
-InfoTitle.TextSize = 11
-InfoTitle.TextXAlignment = Enum.TextXAlignment.Left
-InfoTitle.BackgroundTransparency = 1
-InfoTitle.ZIndex = 11
-InfoTitle.Parent = InfoOverlay
-
-local InfoClose = Instance.new("TextButton")
-InfoClose.Size = UDim2.new(0, 20, 0, 20)
-InfoClose.Position = UDim2.new(1, -25, 0, 5)
-InfoClose.BackgroundColor3 = BLACK
-InfoClose.BorderSizePixel = 1
-InfoClose.BorderColor3 = WHITE
-InfoClose.Text = "X"
-InfoClose.TextColor3 = WHITE
-InfoClose.Font = Enum.Font.Code
-InfoClose.TextSize = 12
-InfoClose.ZIndex = 11
-InfoClose.AutoButtonColor = false
-InfoClose.Parent = InfoOverlay
-setupRetroButton(InfoClose)
-
-local InfoScroll = Instance.new("ScrollingFrame")
-InfoScroll.Size = UDim2.new(1, -16, 1, -40)
-InfoScroll.Position = UDim2.new(0, 8, 0, 35)
-InfoScroll.BackgroundColor3 = BLACK
-InfoScroll.BorderSizePixel = 1
-InfoScroll.BorderColor3 = WHITE
-InfoScroll.ScrollBarThickness = 4
-InfoScroll.ScrollBarImageColor3 = WHITE
-InfoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-InfoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-InfoScroll.ZIndex = 11
-InfoScroll.Parent = InfoOverlay
-
-local InfoTextLabel = Instance.new("TextLabel")
-InfoTextLabel.Size = UDim2.new(1, -10, 0, 0)
-InfoTextLabel.Position = UDim2.new(0, 5, 0, 5)
-InfoTextLabel.BackgroundTransparency = 1
-InfoTextLabel.Font = Enum.Font.Code
-InfoTextLabel.TextSize = 11
-InfoTextLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-InfoTextLabel.TextXAlignment = Enum.TextXAlignment.Left
-InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
-InfoTextLabel.TextWrapped = true
-InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
-InfoTextLabel.ZIndex = 12
-InfoTextLabel.Text = [[
-> SCRIPT FUNCTIONALITY
-
-1. AUTO-HOP LOOP
-   queue_on_teleport re-runs the script after each hop.
-
-2. DONATORS FILTER
-   Requires at least one Roblox Premium player
-   (other than you) on the current server.
-
-3. ACTIVE CHAT FILTER
-   Counts live chat from other players during
-   the analyze window after join.
-
-4. MIN PLAYERS
-   Skip empty / dead servers below the threshold.
-
-5. PREFER FULL
-   When picking the next server, bias toward
-   fuller rooms instead of a fully random pick.
-
-6. ANTI-REPEAT
-   Remembers up to 200 JobIds in
-   ServerFinderVisited.json (oldest dropped).
-   Failed lookups no longer wipe the list.
-
-7. API PAGINATION
-   Walks several pages of the public servers
-   API, retries 429/errors, encodes cursors.
-
-8. HOP ONCE
-   Jump to another server without enabling
-   the auto-loop.
-
-Developed for personal use / ScriptBlox.]]
-InfoTextLabel.Parent = InfoScroll
-
-InfoBtn.MouseButton1Click:Connect(function()
-    if minimized then
-        return
-    end
-    InfoOverlay.Visible = not InfoOverlay.Visible
-end)
-
-InfoClose.MouseButton1Click:Connect(function()
-    InfoOverlay.Visible = false
 end)
 
 local Line1 = Instance.new("Frame")
@@ -521,10 +551,6 @@ local function createToggle(parent, text, pos, size, key)
     end)
     return btn
 end
-
-createToggle(Body, "DONATORS", UDim2.new(0, 8, 0, 8), UDim2.new(0.46, 0, 0, 24), "FilterDonators")
-createToggle(Body, "ACTIVE CHAT", UDim2.new(0.52, 0, 0, 8), UDim2.new(0.46, -8, 0, 24), "FilterChat")
-createToggle(Body, "PREFER FULL", UDim2.new(0, 8, 0, 36), UDim2.new(0.46, 0, 0, 24), "PreferFull")
 
 local function createStepper(parent, label, pos, size, key, minValue, maxValue, suffix)
     local frame = Instance.new("Frame")
@@ -576,12 +602,147 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
     return frame
 end
 
-createStepper(Body, "MIN PL", UDim2.new(0.52, 0, 0, 36), UDim2.new(0.46, -8, 0, 24), "MinPlayers", 1, 40, "")
-createStepper(Body, "ANALYZE", UDim2.new(0, 8, 0, 64), UDim2.new(1, -16, 0, 24), "AnalyzeSeconds", 2, 15, "s")
+local function hint(parent, text, pos)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -16, 0, 14)
+    label.Position = pos
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.Code
+    label.TextSize = 9
+    label.TextColor3 = DIM
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Text = text
+    label.Parent = parent
+    return label
+end
+
+local InfoWin = createWindow({
+    Name = "InfoWindow",
+    Title = "[ DOCUMENTATION & INFO ]",
+    Size = UDim2.new(0, 340, 0, 420),
+    Position = UDim2.new(0.5, 186, 0.5, -210),
+})
+
+local InfoScroll = Instance.new("ScrollingFrame")
+InfoScroll.Size = UDim2.new(1, -16, 1, -16)
+InfoScroll.Position = UDim2.new(0, 8, 0, 8)
+InfoScroll.BackgroundColor3 = BLACK
+InfoScroll.BorderSizePixel = 1
+InfoScroll.BorderColor3 = WHITE
+InfoScroll.ScrollBarThickness = 4
+InfoScroll.ScrollBarImageColor3 = WHITE
+InfoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+InfoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+InfoScroll.Parent = InfoWin.Body
+
+local InfoTextLabel = Instance.new("TextLabel")
+InfoTextLabel.Size = UDim2.new(1, -10, 0, 0)
+InfoTextLabel.Position = UDim2.new(0, 5, 0, 5)
+InfoTextLabel.BackgroundTransparency = 1
+InfoTextLabel.Font = Enum.Font.Code
+InfoTextLabel.TextSize = 11
+InfoTextLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+InfoTextLabel.TextXAlignment = Enum.TextXAlignment.Left
+InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
+InfoTextLabel.TextWrapped = true
+InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
+InfoTextLabel.Text = [[
+> SCRIPT FUNCTIONALITY
+
+1. AUTO-HOP LOOP
+   queue_on_teleport re-runs the script after each hop.
+
+2. DONATORS FILTER
+   Requires at least one Roblox Premium player
+   (other than you) on the current server.
+
+3. ACTIVE CHAT FILTER
+   Counts live chat from other players during
+   the analyze window after join.
+
+4. MIN PLAYERS
+   Skip empty / dead servers below the threshold.
+
+5. PREFER FULL
+   When picking the next server, bias toward
+   fuller rooms instead of a fully random pick.
+
+6. ANTI-REPEAT
+   Remembers up to 200 JobIds in
+   ServerFinderVisited.json (oldest dropped).
+   Failed lookups no longer wipe the list.
+
+7. API PAGINATION
+   Walks several pages of the public servers
+   API, retries 429/errors, encodes cursors.
+
+8. HOP ONCE
+   Jump to another server without enabling
+   the auto-loop.
+
+Use [?] and the gear to open Info / Settings
+as separate windows.
+
+Developed for personal use / ScriptBlox.]]
+InfoTextLabel.Parent = InfoScroll
+
+local SettingsWin = createWindow({
+    Name = "SettingsWindow",
+    Title = "[ SETTINGS ]",
+    Size = UDim2.new(0, 300, 0, 292),
+    Position = UDim2.new(0.5, -486, 0.5, -146),
+})
+
+createToggle(SettingsWin.Body, "DONATORS", UDim2.new(0, 8, 0, 10), UDim2.new(1, -16, 0, 26), "FilterDonators")
+hint(SettingsWin.Body, "need at least 1 premium player", UDim2.new(0, 8, 0, 38))
+
+createToggle(SettingsWin.Body, "ACTIVE CHAT", UDim2.new(0, 8, 0, 58), UDim2.new(1, -16, 0, 26), "FilterChat")
+hint(SettingsWin.Body, "need chat from other players", UDim2.new(0, 8, 0, 86))
+
+createToggle(SettingsWin.Body, "PREFER FULL", UDim2.new(0, 8, 0, 106), UDim2.new(1, -16, 0, 26), "PreferFull")
+hint(SettingsWin.Body, "pick fuller rooms when hopping", UDim2.new(0, 8, 0, 134))
+
+createStepper(SettingsWin.Body, "MIN PLAYERS", UDim2.new(0, 8, 0, 156), UDim2.new(1, -16, 0, 26), "MinPlayers", 1, 40, "")
+hint(SettingsWin.Body, "skip quieter servers below this", UDim2.new(0, 8, 0, 184))
+
+createStepper(SettingsWin.Body, "ANALYZE", UDim2.new(0, 8, 0, 204), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 15, "s")
+hint(SettingsWin.Body, "seconds to listen after join", UDim2.new(0, 8, 0, 232))
+
+local function placeBeside(win, xOffset)
+    local mainPos = Main.AbsolutePosition
+    local parentAbs = ScreenGui.AbsolutePosition
+    win.Frame.Position = UDim2.new(0, (mainPos.X - parentAbs.X) + xOffset, 0, mainPos.Y - parentAbs.Y)
+end
+
+local function windowWidth(win, fallback)
+    local w = win.Frame.AbsoluteSize.X
+    if w < 1 then
+        return fallback
+    end
+    return w
+end
+
+InfoBtn.MouseButton1Click:Connect(function()
+    if not InfoWin.Frame.Visible then
+        placeBeside(InfoWin, Main.AbsoluteSize.X + 12)
+        InfoWin.show()
+    else
+        InfoWin.hide()
+    end
+end)
+
+SettingsBtn.MouseButton1Click:Connect(function()
+    if not SettingsWin.Frame.Visible then
+        placeBeside(SettingsWin, -(windowWidth(SettingsWin, 300) + 12))
+        SettingsWin.show()
+    else
+        SettingsWin.hide()
+    end
+end)
 
 local Stats = Instance.new("TextLabel")
 Stats.Size = UDim2.new(1, -16, 0, 16)
-Stats.Position = UDim2.new(0, 8, 0, 92)
+Stats.Position = UDim2.new(0, 8, 0, 8)
 Stats.BackgroundTransparency = 1
 Stats.Font = Enum.Font.Code
 Stats.TextSize = 10
@@ -592,8 +753,8 @@ Stats.Text = ""
 Stats.Parent = Body
 
 local Scroll = Instance.new("ScrollingFrame")
-Scroll.Size = UDim2.new(1, -16, 1, -196)
-Scroll.Position = UDim2.new(0, 8, 0, 110)
+Scroll.Size = UDim2.new(1, -16, 1, -112)
+Scroll.Position = UDim2.new(0, 8, 0, 28)
 Scroll.BackgroundColor3 = BLACK
 Scroll.BorderSizePixel = 1
 Scroll.BorderColor3 = WHITE
