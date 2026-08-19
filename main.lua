@@ -23,24 +23,20 @@ local function setQueue()
     end
 end
 
--- Система черного списка серверов
+-- Черный список посещенных серверов
 local function loadVisited()
     if isfile and isfile(VISITED_FILE) then
         local success, result = pcall(function()
             return HttpService:JSONDecode(readfile(VISITED_FILE))
         end)
-        if success and type(result) == "table" then
-            return result
-        end
+        if success and type(result) == "table" then return result end
     end
     return {}
 end
 
 local function saveVisited(data)
     if writefile then
-        pcall(function()
-            writefile(VISITED_FILE, HttpService:JSONEncode(data))
-        end)
+        pcall(function() writefile(VISITED_FILE, HttpService:JSONEncode(data)) end)
     end
 end
 
@@ -49,35 +45,24 @@ visitedServers[game.JobId] = true
 
 local visitedCount = 0
 for _ in pairs(visitedServers) do visitedCount = visitedCount + 1 end
-if visitedCount > 150 then
-    visitedServers = {[game.JobId] = true}
-end
+if visitedCount > 150 then visitedServers = {[game.JobId] = true} end
 saveVisited(visitedServers)
 
-local defaultSettings = {
-    AutoHop = false,
-    FilterDonators = true,
-    FilterChat = false
-}
+-- Настройки
+local defaultSettings = { AutoHop = false, FilterDonators = true, FilterChat = false }
 
 local function loadSettings()
     if isfile and isfile(SETTINGS_FILE) then
         local success, result = pcall(function()
             return HttpService:JSONDecode(readfile(SETTINGS_FILE))
         end)
-        if success and type(result) == "table" then
-            return result
-        end
+        if success and type(result) == "table" then return result end
     end
     return defaultSettings
 end
 
 local function saveSettings(cfg)
-    if writefile then
-        pcall(function()
-            writefile(SETTINGS_FILE, HttpService:JSONEncode(cfg))
-        end)
-    end
+    if writefile then pcall(function() writefile(SETTINGS_FILE, HttpService:JSONEncode(cfg)) end) end
 end
 
 local config = loadSettings()
@@ -93,55 +78,30 @@ ScreenGui.ResetOnSpawn = false
 pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
 
--- Главное окно
-local Main = Instance.new("Frame", ScreenGui)
-Main.Size = UDim2.new(0, 0, 0, 2) -- Начинаем с тонкой полоски (CRT эффект)
-Main.Position = UDim2.new(0.5, 0, 0.5, 0)
-Main.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-Main.BorderSizePixel = 1
-Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
-Main.Active = true
-Main.Draggable = true
-Main.ClipsDescendants = true
+-- Функция создания CRT Сканлайна (эффект бегущего луча ЭЛТ-монитора)
+local function addScanlineEffect(parentFrame)
+    local Scanline = Instance.new("Frame", parentFrame)
+    Scanline.Name = "Scanline"
+    Scanline.Size = UDim2.new(1, 0, 0, 2)
+    Scanline.Position = UDim2.new(0, 0, 0, 0)
+    Scanline.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Scanline.BackgroundTransparency = 0.88
+    Scanline.BorderSizePixel = 0
+    Scanline.ZIndex = 10
 
--- CRT Анимация включения (сначала горизонтальный луч, потом вертикальная развертка)
-local openWidth = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-    Size = UDim2.new(0, 330, 0, 2),
-    Position = UDim2.new(0.5, -165, 0.5, 0)
-})
-openWidth:Play()
-openWidth.Completed:Connect(function()
-    TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-        Size = UDim2.new(0, 330, 0, 480),
-        Position = UDim2.new(0.5, -165, 0.5, -240)
-    }):Play()
-end)
+    task.spawn(function()
+        while parentFrame and parentFrame.Parent do
+            Scanline.Position = UDim2.new(0, 0, 0, 0)
+            local tw = TweenService:Create(Scanline, TweenInfo.new(3, Enum.EasingStyle.Linear), {
+                Position = UDim2.new(0, 0, 1, -2)
+            })
+            tw:Play()
+            tw.Completed:Wait()
+        end
+    end)
+end
 
--- Пульсация рамки терминала
-task.spawn(function()
-    while Main and Main.Parent do
-        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-            BorderColor3 = Color3.fromRGB(100, 100, 100)
-        }):Play()
-        task.wait(1.2)
-        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-            BorderColor3 = Color3.fromRGB(255, 255, 255)
-        }):Play()
-        task.wait(1.2)
-    end
-end)
-
-local Title = Instance.new("TextLabel", Main)
-Title.Size = UDim2.new(1, -35, 0, 30)
-Title.Position = UDim2.new(0, 8, 0, 0)
-Title.Text = "[ AUTOEXEC SERVER FINDER ]"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.Font = Enum.Font.Code
-Title.TextSize = 12
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.BackgroundTransparency = 1
-
--- Анимация кнопок (Hover + Click Recoil)
+-- Анимация кнопок
 local function setupRetroButton(button)
     local origSize = button.Size
 
@@ -172,6 +132,66 @@ local function setupRetroButton(button)
     end)
 end
 
+-- Главное окно
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, 0, 0, 2)
+Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+Main.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Main.BorderSizePixel = 1
+Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
+Main.Active = true
+Main.Draggable = true
+Main.ClipsDescendants = true
+
+addScanlineEffect(Main)
+
+-- CRT Разворачивание Main
+local openWidth = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    Size = UDim2.new(0, 330, 0, 2),
+    Position = UDim2.new(0.5, -165, 0.5, 0)
+})
+openWidth:Play()
+openWidth.Completed:Connect(function()
+    TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 330, 0, 480),
+        Position = UDim2.new(0.5, -165, 0.5, -240)
+    }):Play()
+end)
+
+-- Пульсация рамки
+task.spawn(function()
+    while Main and Main.Parent do
+        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = Color3.fromRGB(120, 120, 120) }):Play()
+        task.wait(1.2)
+        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = Color3.fromRGB(255, 255, 255) }):Play()
+        task.wait(1.2)
+    end
+end)
+
+local Title = Instance.new("TextLabel", Main)
+Title.Size = UDim2.new(1, -70, 0, 30)
+Title.Position = UDim2.new(0, 8, 0, 0)
+Title.Text = "[ SERVER FINDER ]"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.Code
+Title.TextSize = 12
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.BackgroundTransparency = 1
+
+-- Кнопка INFO [?]
+local InfoBtn = Instance.new("TextButton", Main)
+InfoBtn.Size = UDim2.new(0, 22, 0, 20)
+InfoBtn.Position = UDim2.new(1, -50, 0, 5)
+InfoBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+InfoBtn.BorderSizePixel = 1
+InfoBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
+InfoBtn.Text = "?"
+InfoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+InfoBtn.Font = Enum.Font.Code
+InfoBtn.TextSize = 12
+setupRetroButton(InfoBtn)
+
+-- Кнопка CLOSE [X]
 local CloseBtn = Instance.new("TextButton", Main)
 CloseBtn.Size = UDim2.new(0, 20, 0, 20)
 CloseBtn.Position = UDim2.new(1, -25, 0, 5)
@@ -193,15 +213,110 @@ CloseBtn.MouseButton1Click:Connect(function()
         Position = UDim2.new(0.5, -165, 0.5, 0)
     })
     closeVert:Play()
-    closeVert.Completed:Connect(function()
-        local closeHoriz = TweenService:Create(Main, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 0, 0, 2),
-            Position = UDim2.new(0.5, 0, 0.5, 0)
-        })
-        closeHoriz:Play()
-        closeHoriz.Completed:Connect(function() ScreenGui:Destroy() end)
-    end)
+    closeVert.Completed:Connect(function() ScreenGui:Destroy() end)
 end)
+
+-- Окно INFO
+local InfoFrame = Instance.new("Frame", ScreenGui)
+InfoFrame.Name = "InfoModal"
+InfoFrame.Size = UDim2.new(0, 0, 0, 2)
+InfoFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+InfoFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+InfoFrame.BorderSizePixel = 1
+InfoFrame.BorderColor3 = Color3.fromRGB(255, 255, 255)
+InfoFrame.Active = true
+InfoFrame.Draggable = true
+InfoFrame.Visible = false
+InfoFrame.ClipsDescendants = true
+InfoFrame.ZIndex = 15
+
+addScanlineEffect(InfoFrame)
+
+local InfoTitle = Instance.new("TextLabel", InfoFrame)
+InfoTitle.Size = UDim2.new(1, -30, 0, 30)
+InfoTitle.Position = UDim2.new(0, 10, 0, 0)
+InfoTitle.Text = "[ DOCUMENTATION & INFO ]"
+InfoTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+InfoTitle.Font = Enum.Font.Code
+InfoTitle.TextSize = 11
+InfoTitle.TextXAlignment = Enum.TextXAlignment.Left
+InfoTitle.BackgroundTransparency = 1
+
+local InfoClose = Instance.new("TextButton", InfoFrame)
+InfoClose.Size = UDim2.new(0, 20, 0, 20)
+InfoClose.Position = UDim2.new(1, -25, 0, 5)
+InfoClose.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+InfoClose.BorderSizePixel = 1
+InfoClose.BorderColor3 = Color3.fromRGB(255, 255, 255)
+InfoClose.Text = "X"
+InfoClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+InfoClose.Font = Enum.Font.Code
+InfoClose.TextSize = 12
+setupRetroButton(InfoClose)
+
+local InfoText = Instance.new("TextLabel", InfoFrame)
+InfoText.Size = UDim2.new(1, -20, 1, -40)
+InfoText.Position = UDim2.new(0, 10, 0, 35)
+InfoText.BackgroundTransparency = 1
+InfoText.Font = Enum.Font.Code
+InfoText.TextSize = 10
+InfoText.TextColor3 = Color3.fromRGB(220, 220, 220)
+InfoText.TextXAlignment = Enum.TextXAlignment.Left
+InfoText.TextYAlignment = Enum.TextYAlignment.Top
+InfoText.TextWrapped = true
+InfoText.Text = [[
+> HOW IT WORKS:
+
+1. AUTO-HOP LOOP:
+   Uses queue_on_teleport to safely reconnect script on every new server join.
+
+2. DONATORS FILTER:
+   Scans current server for Roblox Premium / Donator players.
+
+3. ACTIVE CHAT FILTER:
+   Analyzes server chat for 5 seconds upon join to confirm player chat activity (system messages are ignored).
+
+4. ANTI-REPEAT CACHE:
+   Saves up to 150 visited JobIds in 'ServerFinderVisited.json'. You will NEVER visit the same server twice!
+
+Developed for ScriptBlox. Enjoy!]]
+
+local function toggleInfoWindow(show)
+    if show then
+        InfoFrame.Visible = true
+        InfoFrame.Size = UDim2.new(0, 0, 0, 2)
+        InfoFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+        
+        local tw1 = TweenService:Create(InfoFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, 310, 0, 2),
+            Position = UDim2.new(0.5, -155, 0.5, 0)
+        })
+        tw1:Play()
+        tw1.Completed:Connect(function()
+            TweenService:Create(InfoFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.new(0, 310, 0, 320),
+                Position = UDim2.new(0.5, -155, 0.5, -160)
+            }):Play()
+        end)
+    else
+        local tw2 = TweenService:Create(InfoFrame, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 310, 0, 2),
+            Position = UDim2.new(0.5, -155, 0.5, 0)
+        })
+        tw2:Play()
+        tw2.Completed:Connect(function()
+            local tw3 = TweenService:Create(InfoFrame, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Size = UDim2.new(0, 0, 0, 2),
+                Position = UDim2.new(0.5, 0, 0.5, 0)
+            })
+            tw3:Play()
+            tw3.Completed:Connect(function() InfoFrame.Visible = false end)
+        end)
+    end
+end
+
+InfoBtn.MouseButton1Click:Connect(function() toggleInfoWindow(not InfoFrame.Visible) end)
+InfoClose.MouseButton1Click:Connect(function() toggleInfoWindow(false) end)
 
 local Line1 = Instance.new("Frame", Main)
 Line1.Size = UDim2.new(1, 0, 0, 1)
@@ -287,7 +402,6 @@ end
 for _, pl in ipairs(Players:GetPlayers()) do trackPlayer(pl) end
 Players.PlayerAdded:Connect(trackPlayer)
 
--- Каскадный вывод списка игроков (терминальный стиль)
 local function renderPlayers()
     for _, v in ipairs(Scroll:GetChildren()) do
         if v:IsA("Frame") then v:Destroy() end
@@ -299,7 +413,7 @@ local function renderPlayers()
 
         local Card = Instance.new("Frame", Scroll)
         Card.Size = UDim2.new(1, -6, 0, 34)
-        Card.Position = UDim2.new(-1, 0, 0, 0) -- Старт за экраном слева
+        Card.Position = UDim2.new(-1, 0, 0, 0)
         Card.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         Card.BorderSizePixel = 1
         Card.BorderColor3 = Color3.fromRGB(255, 255, 255)
@@ -326,7 +440,6 @@ local function renderPlayers()
         Info.TextXAlignment = Enum.TextXAlignment.Left
         Info.BackgroundTransparency = 1
 
-        -- Каскадная анимация выезда карточки
         task.delay(index * 0.04, function()
             if Card and Card.Parent then
                 TweenService:Create(Card, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
@@ -338,7 +451,6 @@ local function renderPlayers()
     Scroll.CanvasSize = UDim2.new(0, 0, 0, #playersList * 38)
 end
 
--- Сканирование API с пагинацией (до 500 серверов вглубь)
 local function getUnvisitedServer()
     local httpRequest = request or http_request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
     if not httpRequest then return nil end
@@ -394,7 +506,6 @@ local function executeHop()
     if isHopping then return end
     isHopping = true
 
-    -- ASCII-анимация поиска в кнопке
     task.spawn(function()
         local frames = {"[ / ] SEARCHING...", "[ - ] SEARCHING...", "[ \\ ] SEARCHING...", "[ | ] SEARCHING..."}
         local idx = 1
@@ -423,7 +534,6 @@ local function executeHop()
             end
         end)
     else
-        -- Если обошли сотни серверов и новые не найдены — сбрасываем историю
         visitedServers = {[game.JobId] = true}
         saveVisited(visitedServers)
         pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
@@ -441,7 +551,6 @@ end)
 local function evaluateServer()
     if not config.AutoHop then return end
 
-    -- Анимация таймера анализа
     chatMessageCount = 0
     for i = 5, 1, -1 do
         if not config.AutoHop then updateBtnText() return end
