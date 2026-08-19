@@ -1,11 +1,24 @@
--- Конфигурация через файлы экзекутора
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Players = game:GetService("Players")
 local TextChatService = game:GetService("TextChatService")
 local CoreGui = game:GetService("CoreGui")
 
+local RAW_URL = "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"
 local SETTINGS_FILE = "ServerFinderConfig.json"
+
+-- Автоматическая очередь для экзекутора перед каждым прыжком
+local function setQueue()
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if q then
+        pcall(function()
+            q(string.format([[
+                repeat task.wait() until game:IsLoaded()
+                loadstring(game:HttpGet("%s"))()
+            ]], RAW_URL))
+        end)
+    end
+end
 
 local defaultSettings = {
     AutoHop = false,
@@ -13,7 +26,6 @@ local defaultSettings = {
     FilterChat = false
 }
 
--- Функция чтения настроек из файла
 local function loadSettings()
     if isfile and isfile(SETTINGS_FILE) then
         local success, result = pcall(function()
@@ -26,7 +38,6 @@ local function loadSettings()
     return defaultSettings
 end
 
--- Функция сохранения настроек в файл
 local function saveSettings(cfg)
     if writefile then
         pcall(function()
@@ -37,7 +48,6 @@ end
 
 local config = loadSettings()
 
--- Защита от дублирования интерфейса
 if CoreGui:FindFirstChild("ClassicServerFinder") then
     CoreGui.ClassicServerFinder:Destroy()
 end
@@ -49,7 +59,6 @@ ScreenGui.ResetOnSpawn = false
 pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
 
--- Главная панель в строго классическом стиле
 local Main = Instance.new("Frame", ScreenGui)
 Main.Size = UDim2.new(0, 330, 0, 480)
 Main.Position = UDim2.new(0.5, -165, 0.5, -240)
@@ -91,7 +100,6 @@ Line1.Position = UDim2.new(0, 0, 0, 30)
 Line1.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 Line1.BorderSizePixel = 0
 
--- Чекбоксы
 local function createToggle(text, pos, key)
     local Btn = Instance.new("TextButton", Main)
     Btn.Size = UDim2.new(0.46, 0, 0, 26)
@@ -149,7 +157,6 @@ local function updateBtnText()
 end
 updateBtnText()
 
--- Отслеживание сообщений
 local chatMessageCount = 0
 pcall(function()
     TextChatService.MessageReceived:Connect(function() chatMessageCount = chatMessageCount + 1 end)
@@ -161,7 +168,6 @@ Players.PlayerAdded:Connect(function(pl)
     pl.Chatted:Connect(function() chatMessageCount = chatMessageCount + 1 end)
 end)
 
--- Рендер игроков
 local function renderPlayers()
     for _, v in ipairs(Scroll:GetChildren()) do
         if v:IsA("Frame") then v:Destroy() end
@@ -201,8 +207,9 @@ local function renderPlayers()
     Scroll.CanvasSize = UDim2.new(0, 0, 0, UIList.AbsoluteContentSize.Y + 6)
 end
 
--- Логика перехода
 local function executeHop()
+    setQueue() -- Передаем команду экзекутору прямо перед прыжком
+    
     local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
     if not httpRequest then return end
 
@@ -224,6 +231,9 @@ local function executeHop()
                 task.wait(3)
                 executeHop()
             end
+        else
+            task.wait(3)
+            executeHop()
         end
     else
         task.wait(3)
@@ -231,7 +241,14 @@ local function executeHop()
     end
 end
 
--- Проверка сервера при заходе
+-- Авто-повтор при сбое подключения к серверу
+TeleportService.TeleportInitFailed:Connect(function()
+    task.wait(2)
+    if config.AutoHop then
+        executeHop()
+    end
+end)
+
 local function evaluateServer()
     if not config.AutoHop then return end
 
@@ -251,9 +268,11 @@ local function evaluateServer()
         end
     end
 
+    -- Логика фильтров:
     local passDonators = not config.FilterDonators or (donatorCount >= 1)
     local passChat = not config.FilterChat or (chatMessageCount >= 1)
 
+    -- Сервер подходит только если ОБА включенных условия выполнены
     if passDonators and passChat then
         SearchBtn.Text = "[ MATCH FOUND! STOPPED ]"
         config.AutoHop = false
