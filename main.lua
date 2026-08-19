@@ -11,7 +11,6 @@ local VISITED_FILE = "ServerFinderVisited.json"
 
 local isHopping = false
 
--- Автоматическая очередь телепорта
 local function setQueue()
     local q = queue_on_teleport or (getgenv and getgenv().queue_on_teleport)
     if q then
@@ -24,7 +23,7 @@ local function setQueue()
     end
 end
 
--- История посещенных серверов
+-- Система черного списка серверов
 local function loadVisited()
     if isfile and isfile(VISITED_FILE) then
         local success, result = pcall(function()
@@ -48,15 +47,13 @@ end
 local visitedServers = loadVisited()
 visitedServers[game.JobId] = true
 
--- Очистка истории, если сохраненных серверов больше 60
 local visitedCount = 0
 for _ in pairs(visitedServers) do visitedCount = visitedCount + 1 end
-if visitedCount > 60 then
+if visitedCount > 150 then
     visitedServers = {[game.JobId] = true}
 end
 saveVisited(visitedServers)
 
--- Конфигурация
 local defaultSettings = {
     AutoHop = false,
     FilterDonators = true,
@@ -98,8 +95,8 @@ if not ScreenGui.Parent then ScreenGui.Parent = Players.LocalPlayer:WaitForChild
 
 -- Главное окно
 local Main = Instance.new("Frame", ScreenGui)
-Main.Size = UDim2.new(0, 330, 0, 0) -- Начинается с высоты 0 для анимации разворачивания
-Main.Position = UDim2.new(0.5, -165, 0.5, -240)
+Main.Size = UDim2.new(0, 0, 0, 2) -- Начинаем с тонкой полоски (CRT эффект)
+Main.Position = UDim2.new(0.5, 0, 0.5, 0)
 Main.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 Main.BorderSizePixel = 1
 Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
@@ -107,10 +104,32 @@ Main.Active = true
 Main.Draggable = true
 Main.ClipsDescendants = true
 
--- Анимация появления GUI (CRT/Терминальное открытие)
-TweenService:Create(Main, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-    Size = UDim2.new(0, 330, 0, 480)
-}):Play()
+-- CRT Анимация включения (сначала горизонтальный луч, потом вертикальная развертка)
+local openWidth = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    Size = UDim2.new(0, 330, 0, 2),
+    Position = UDim2.new(0.5, -165, 0.5, 0)
+})
+openWidth:Play()
+openWidth.Completed:Connect(function()
+    TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 330, 0, 480),
+        Position = UDim2.new(0.5, -165, 0.5, -240)
+    }):Play()
+end)
+
+-- Пульсация рамки терминала
+task.spawn(function()
+    while Main and Main.Parent do
+        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            BorderColor3 = Color3.fromRGB(100, 100, 100)
+        }):Play()
+        task.wait(1.2)
+        TweenService:Create(Main, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            BorderColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+        task.wait(1.2)
+    end
+end)
 
 local Title = Instance.new("TextLabel", Main)
 Title.Size = UDim2.new(1, -35, 0, 30)
@@ -122,18 +141,33 @@ Title.TextSize = 12
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.BackgroundTransparency = 1
 
--- Ретро-анимация наведения на кнопки (Инверсия монохромного стиля)
-local function applyRetroHover(button)
+-- Анимация кнопок (Hover + Click Recoil)
+local function setupRetroButton(button)
+    local origSize = button.Size
+
     button.MouseEnter:Connect(function()
-        TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+        TweenService:Create(button, TweenInfo.new(0.12), {
             BackgroundColor3 = Color3.fromRGB(255, 255, 255),
             TextColor3 = Color3.fromRGB(0, 0, 0)
         }):Play()
     end)
+
     button.MouseLeave:Connect(function()
-        TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+        TweenService:Create(button, TweenInfo.new(0.12), {
             BackgroundColor3 = Color3.fromRGB(0, 0, 0),
             TextColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+    end)
+
+    button.MouseButton1Down:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.05), {
+            Size = UDim2.new(origSize.X.Scale, origSize.X.Offset - 4, origSize.Y.Scale, origSize.Y.Offset - 2)
+        }):Play()
+    end)
+
+    button.MouseButton1Up:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.08, Enum.EasingStyle.Back), {
+            Size = origSize
         }):Play()
     end)
 end
@@ -148,18 +182,24 @@ CloseBtn.Text = "X"
 CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 CloseBtn.Font = Enum.Font.Code
 CloseBtn.TextSize = 12
-applyRetroHover(CloseBtn)
+setupRetroButton(CloseBtn)
 
 CloseBtn.MouseButton1Click:Connect(function()
     config.AutoHop = false
     saveSettings(config)
     
-    local closeTween = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-        Size = UDim2.new(0, 330, 0, 0)
+    local closeVert = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+        Size = UDim2.new(0, 330, 0, 2),
+        Position = UDim2.new(0.5, -165, 0.5, 0)
     })
-    closeTween:Play()
-    closeTween.Completed:Connect(function()
-        ScreenGui:Destroy()
+    closeVert:Play()
+    closeVert.Completed:Connect(function()
+        local closeHoriz = TweenService:Create(Main, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 0, 0, 2),
+            Position = UDim2.new(0.5, 0, 0.5, 0)
+        })
+        closeHoriz:Play()
+        closeHoriz.Completed:Connect(function() ScreenGui:Destroy() end)
     end)
 end)
 
@@ -179,7 +219,7 @@ local function createToggle(text, pos, key)
     Btn.Font = Enum.Font.Code
     Btn.TextSize = 10
     Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    applyRetroHover(Btn)
+    setupRetroButton(Btn)
 
     local function updateText()
         Btn.Text = (config[key] and "[X] " or "[ ] ") .. text
@@ -217,7 +257,7 @@ SearchBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
 SearchBtn.Font = Enum.Font.Code
 SearchBtn.TextSize = 11
 SearchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-applyRetroHover(SearchBtn)
+setupRetroButton(SearchBtn)
 
 local function updateBtnText()
     if config.AutoHop then
@@ -247,16 +287,19 @@ end
 for _, pl in ipairs(Players:GetPlayers()) do trackPlayer(pl) end
 Players.PlayerAdded:Connect(trackPlayer)
 
+-- Каскадный вывод списка игроков (терминальный стиль)
 local function renderPlayers()
     for _, v in ipairs(Scroll:GetChildren()) do
         if v:IsA("Frame") then v:Destroy() end
     end
 
-    for _, pl in ipairs(Players:GetPlayers()) do
+    local playersList = Players:GetPlayers()
+    for index, pl in ipairs(playersList) do
         local isDonator = (pl.MembershipType == Enum.MembershipType.Premium)
 
         local Card = Instance.new("Frame", Scroll)
         Card.Size = UDim2.new(1, -6, 0, 34)
+        Card.Position = UDim2.new(-1, 0, 0, 0) -- Старт за экраном слева
         Card.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         Card.BorderSizePixel = 1
         Card.BorderColor3 = Color3.fromRGB(255, 255, 255)
@@ -282,33 +325,45 @@ local function renderPlayers()
         Info.TextSize = 10
         Info.TextXAlignment = Enum.TextXAlignment.Left
         Info.BackgroundTransparency = 1
+
+        -- Каскадная анимация выезда карточки
+        task.delay(index * 0.04, function()
+            if Card and Card.Parent then
+                TweenService:Create(Card, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    Position = UDim2.new(0, 0, 0, 0)
+                }):Play()
+            end
+        end)
     end
-    Scroll.CanvasSize = UDim2.new(0, 0, 0, UIList.AbsoluteContentSize.Y + 6)
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, #playersList * 38)
 end
 
--- Поиск нового сервера без повторов
-local function executeHop()
-    if isHopping then return end
-    isHopping = true
+-- Сканирование API с пагинацией (до 500 серверов вглубь)
+local function getUnvisitedServer()
+    local httpRequest = request or http_request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
+    if not httpRequest then return nil end
 
-    SearchBtn.Text = "[ SEARCHING NEW UNVISITED... ]"
-    setQueue()
+    local sortOrders = {"Asc", "Desc"}
+    local selectedSort = sortOrders[math.random(1, #sortOrders)]
+    local cursor = ""
+    local attempts = 0
 
-    local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
-    local targetServer = nil
+    while attempts < 5 do
+        attempts = attempts + 1
+        local url = string.format(
+            "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100%s",
+            game.PlaceId,
+            selectedSort,
+            cursor ~= "" and ("&cursor=" .. cursor) or ""
+        )
 
-    if httpRequest then
-        -- Получаем список серверов
-        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100", game.PlaceId)
         local success, res = pcall(function() return httpRequest({Url = url, Method = "GET"}) end)
-
         if success and res and res.Body then
             local decSuccess, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
             if decSuccess and data and data.data then
                 local valid = {}
                 for _, s in ipairs(data.data) do
                     if type(s) == "table" and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
-                        -- Фильтр: Исключаем текущий сервер И все ранее посещенные
                         if s.id ~= game.JobId and not visitedServers[s.id] then
                             table.insert(valid, s.id)
                         end
@@ -316,11 +371,43 @@ local function executeHop()
                 end
 
                 if #valid > 0 then
-                    targetServer = valid[math.random(1, #valid)]
+                    return valid[math.random(1, #valid)]
                 end
+
+                if data.nextPageCursor and data.nextPageCursor ~= "" then
+                    cursor = data.nextPageCursor
+                else
+                    break
+                end
+            else
+                break
             end
+        else
+            break
         end
+        task.wait(0.1)
     end
+    return nil
+end
+
+local function executeHop()
+    if isHopping then return end
+    isHopping = true
+
+    -- ASCII-анимация поиска в кнопке
+    task.spawn(function()
+        local frames = {"[ / ] SEARCHING...", "[ - ] SEARCHING...", "[ \\ ] SEARCHING...", "[ | ] SEARCHING..."}
+        local idx = 1
+        while isHopping do
+            SearchBtn.Text = frames[idx]
+            idx = (idx % #frames) + 1
+            task.wait(0.12)
+        end
+    end)
+
+    setQueue()
+
+    local targetServer = getUnvisitedServer()
 
     if targetServer then
         visitedServers[targetServer] = true
@@ -336,7 +423,7 @@ local function executeHop()
             end
         end)
     else
-        -- Если незасеченных серверов в первом списке не осталось, сбрасываем историю и прыгаем случайно
+        -- Если обошли сотни серверов и новые не найдены — сбрасываем историю
         visitedServers = {[game.JobId] = true}
         saveVisited(visitedServers)
         pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
@@ -354,9 +441,13 @@ end)
 local function evaluateServer()
     if not config.AutoHop then return end
 
-    SearchBtn.Text = "[ ANALYZING (5s)... ]"
+    -- Анимация таймера анализа
     chatMessageCount = 0
-    task.wait(5)
+    for i = 5, 1, -1 do
+        if not config.AutoHop then updateBtnText() return end
+        SearchBtn.Text = string.format("[ ANALYZING (%ds)... ]", i)
+        task.wait(1)
+    end
 
     if not config.AutoHop then
         updateBtnText()
@@ -379,7 +470,7 @@ local function evaluateServer()
         saveSettings(config)
     else
         SearchBtn.Text = "[ NOT MATCHED. NEXT... ]"
-        task.wait(0.5)
+        task.wait(0.4)
         executeHop()
     end
 end
