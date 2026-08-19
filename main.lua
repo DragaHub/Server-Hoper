@@ -7,7 +7,6 @@ local CoreGui = game:GetService("CoreGui")
 local RAW_URL = "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"
 local SETTINGS_FILE = "ServerFinderConfig.json"
 
--- Автоматическая очередь для экзекутора перед каждым прыжком
 local function setQueue()
     local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if q then
@@ -157,16 +156,25 @@ local function updateBtnText()
 end
 updateBtnText()
 
+-- Подсчет сообщений ТОЛЬКО от живых игроков
 local chatMessageCount = 0
+
 pcall(function()
-    TextChatService.MessageReceived:Connect(function() chatMessageCount = chatMessageCount + 1 end)
+    TextChatService.MessageReceived:Connect(function(msg)
+        if msg and msg.TextSource then -- TextSource есть только у обычных игроков
+            chatMessageCount = chatMessageCount + 1
+        end
+    end)
 end)
-for _, pl in ipairs(Players:GetPlayers()) do
-    pl.Chatted:Connect(function() chatMessageCount = chatMessageCount + 1 end)
+
+local function trackPlayer(pl)
+    pl.Chatted:Connect(function()
+        chatMessageCount = chatMessageCount + 1
+    end)
 end
-Players.PlayerAdded:Connect(function(pl)
-    pl.Chatted:Connect(function() chatMessageCount = chatMessageCount + 1 end)
-end)
+
+for _, pl in ipairs(Players:GetPlayers()) do trackPlayer(pl) end
+Players.PlayerAdded:Connect(trackPlayer)
 
 local function renderPlayers()
     for _, v in ipairs(Scroll:GetChildren()) do
@@ -208,7 +216,7 @@ local function renderPlayers()
 end
 
 local function executeHop()
-    setQueue() -- Передаем команду экзекутору прямо перед прыжком
+    setQueue()
     
     local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
     if not httpRequest then return end
@@ -241,7 +249,6 @@ local function executeHop()
     end
 end
 
--- Авто-повтор при сбое подключения к серверу
 TeleportService.TeleportInitFailed:Connect(function()
     task.wait(2)
     if config.AutoHop then
@@ -268,11 +275,9 @@ local function evaluateServer()
         end
     end
 
-    -- Логика фильтров:
     local passDonators = not config.FilterDonators or (donatorCount >= 1)
     local passChat = not config.FilterChat or (chatMessageCount >= 1)
 
-    -- Сервер подходит только если ОБА включенных условия выполнены
     if passDonators and passChat then
         SearchBtn.Text = "[ MATCH FOUND! STOPPED ]"
         config.AutoHop = false
