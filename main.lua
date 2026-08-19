@@ -78,30 +78,7 @@ ScreenGui.ResetOnSpawn = false
 pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
 
--- Функция создания CRT Сканлайна (эффект бегущего луча ЭЛТ-монитора)
-local function addScanlineEffect(parentFrame)
-    local Scanline = Instance.new("Frame", parentFrame)
-    Scanline.Name = "Scanline"
-    Scanline.Size = UDim2.new(1, 0, 0, 2)
-    Scanline.Position = UDim2.new(0, 0, 0, 0)
-    Scanline.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    Scanline.BackgroundTransparency = 0.88
-    Scanline.BorderSizePixel = 0
-    Scanline.ZIndex = 10
-
-    task.spawn(function()
-        while parentFrame and parentFrame.Parent do
-            Scanline.Position = UDim2.new(0, 0, 0, 0)
-            local tw = TweenService:Create(Scanline, TweenInfo.new(3, Enum.EasingStyle.Linear), {
-                Position = UDim2.new(0, 0, 1, -2)
-            })
-            tw:Play()
-            tw.Completed:Wait()
-        end
-    end)
-end
-
--- Анимация кнопок
+-- Анимация кнопок (Hover + Click Recoil)
 local function setupRetroButton(button)
     local origSize = button.Size
 
@@ -134,8 +111,8 @@ end
 
 -- Главное окно
 local Main = Instance.new("Frame", ScreenGui)
-Main.Size = UDim2.new(0, 0, 0, 2)
-Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+Main.Size = UDim2.new(0, 330, 0, 480)
+Main.Position = UDim2.new(0.5, -165, 0.5, -240)
 Main.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 Main.BorderSizePixel = 1
 Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
@@ -143,20 +120,11 @@ Main.Active = true
 Main.Draggable = true
 Main.ClipsDescendants = true
 
-addScanlineEffect(Main)
-
--- CRT Разворачивание Main
-local openWidth = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-    Size = UDim2.new(0, 330, 0, 2),
-    Position = UDim2.new(0.5, -165, 0.5, 0)
-})
-openWidth:Play()
-openWidth.Completed:Connect(function()
-    TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-        Size = UDim2.new(0, 330, 0, 480),
-        Position = UDim2.new(0.5, -165, 0.5, -240)
-    }):Play()
-end)
+-- Плавное появление интерфейса
+Main.BackgroundTransparency = 1
+TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    BackgroundTransparency = 0
+}):Play()
 
 -- Пульсация рамки
 task.spawn(function()
@@ -207,42 +175,32 @@ setupRetroButton(CloseBtn)
 CloseBtn.MouseButton1Click:Connect(function()
     config.AutoHop = false
     saveSettings(config)
-    
-    local closeVert = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-        Size = UDim2.new(0, 330, 0, 2),
-        Position = UDim2.new(0.5, -165, 0.5, 0)
-    })
-    closeVert:Play()
-    closeVert.Completed:Connect(function() ScreenGui:Destroy() end)
+    ScreenGui:Destroy()
 end)
 
--- Окно INFO
-local InfoFrame = Instance.new("Frame", ScreenGui)
-InfoFrame.Name = "InfoModal"
-InfoFrame.Size = UDim2.new(0, 0, 0, 2)
-InfoFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
-InfoFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-InfoFrame.BorderSizePixel = 1
-InfoFrame.BorderColor3 = Color3.fromRGB(255, 255, 255)
-InfoFrame.Active = true
-InfoFrame.Draggable = true
-InfoFrame.Visible = false
-InfoFrame.ClipsDescendants = true
-InfoFrame.ZIndex = 15
+-- Встроенное модальное окно INFO (Оверлей поверх Main)
+local InfoOverlay = Instance.new("Frame", Main)
+InfoOverlay.Name = "InfoOverlay"
+InfoOverlay.Size = UDim2.new(1, 0, 1, 0)
+InfoOverlay.Position = UDim2.new(0, 0, 0, 0)
+InfoOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+InfoOverlay.BorderSizePixel = 1
+InfoOverlay.BorderColor3 = Color3.fromRGB(255, 255, 255)
+InfoOverlay.Visible = false
+InfoOverlay.ZIndex = 10
 
-addScanlineEffect(InfoFrame)
-
-local InfoTitle = Instance.new("TextLabel", InfoFrame)
-InfoTitle.Size = UDim2.new(1, -30, 0, 30)
-InfoTitle.Position = UDim2.new(0, 10, 0, 0)
+local InfoTitle = Instance.new("TextLabel", InfoOverlay)
+InfoTitle.Size = UDim2.new(1, -35, 0, 30)
+InfoTitle.Position = UDim2.new(0, 8, 0, 0)
 InfoTitle.Text = "[ DOCUMENTATION & INFO ]"
 InfoTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 InfoTitle.Font = Enum.Font.Code
 InfoTitle.TextSize = 11
 InfoTitle.TextXAlignment = Enum.TextXAlignment.Left
 InfoTitle.BackgroundTransparency = 1
+InfoTitle.ZIndex = 11
 
-local InfoClose = Instance.new("TextButton", InfoFrame)
+local InfoClose = Instance.new("TextButton", InfoOverlay)
 InfoClose.Size = UDim2.new(0, 20, 0, 20)
 InfoClose.Position = UDim2.new(1, -25, 0, 5)
 InfoClose.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -252,71 +210,60 @@ InfoClose.Text = "X"
 InfoClose.TextColor3 = Color3.fromRGB(255, 255, 255)
 InfoClose.Font = Enum.Font.Code
 InfoClose.TextSize = 12
+InfoClose.ZIndex = 11
 setupRetroButton(InfoClose)
 
-local InfoText = Instance.new("TextLabel", InfoFrame)
-InfoText.Size = UDim2.new(1, -20, 1, -40)
-InfoText.Position = UDim2.new(0, 10, 0, 35)
-InfoText.BackgroundTransparency = 1
-InfoText.Font = Enum.Font.Code
-InfoText.TextSize = 10
-InfoText.TextColor3 = Color3.fromRGB(220, 220, 220)
-InfoText.TextXAlignment = Enum.TextXAlignment.Left
-InfoText.TextYAlignment = Enum.TextYAlignment.Top
-InfoText.TextWrapped = true
-InfoText.Text = [[
-> HOW IT WORKS:
+local InfoScroll = Instance.new("ScrollingFrame", InfoOverlay)
+InfoScroll.Size = UDim2.new(1, -16, 1, -40)
+InfoScroll.Position = UDim2.new(0, 8, 0, 35)
+InfoScroll.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+InfoScroll.BorderSizePixel = 1
+InfoScroll.BorderColor3 = Color3.fromRGB(255, 255, 255)
+InfoScroll.ScrollBarThickness = 4
+InfoScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
+InfoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+InfoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+InfoScroll.ZIndex = 11
 
-1. AUTO-HOP LOOP:
-   Uses queue_on_teleport to safely reconnect script on every new server join.
+local InfoTextLabel = Instance.new("TextLabel", InfoScroll)
+InfoTextLabel.Size = UDim2.new(1, -10, 0, 0)
+InfoTextLabel.Position = UDim2.new(0, 5, 0, 5)
+InfoTextLabel.BackgroundTransparency = 1
+InfoTextLabel.Font = Enum.Font.Code
+InfoTextLabel.TextSize = 11
+InfoTextLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+InfoTextLabel.TextXAlignment = Enum.TextXAlignment.Left
+InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
+InfoTextLabel.TextWrapped = true
+InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
+InfoTextLabel.ZIndex = 12
+InfoTextLabel.Text = [[
+> SCRIPT FUNCTIONALITY:
 
-2. DONATORS FILTER:
-   Scans current server for Roblox Premium / Donator players.
+1. AUTO-HOP LOOP
+   Uses queue_on_teleport to re-execute script instantly when joining new servers.
 
-3. ACTIVE CHAT FILTER:
-   Analyzes server chat for 5 seconds upon join to confirm player chat activity (system messages are ignored).
+2. DONATORS FILTER
+   Scans all server members to detect Roblox Premium / Donator status.
 
-4. ANTI-REPEAT CACHE:
-   Saves up to 150 visited JobIds in 'ServerFinderVisited.json'. You will NEVER visit the same server twice!
+3. ACTIVE CHAT FILTER
+   Analyzes live chat messages for 5 seconds after join to ensure active conversation.
 
-Developed for ScriptBlox. Enjoy!]]
+4. ANTI-REPEAT SYSTEM
+   Tracks up to 150 unique JobIds in 'ServerFinderVisited.json' to prevent server loops.
 
-local function toggleInfoWindow(show)
-    if show then
-        InfoFrame.Visible = true
-        InfoFrame.Size = UDim2.new(0, 0, 0, 2)
-        InfoFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
-        
-        local tw1 = TweenService:Create(InfoFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            Size = UDim2.new(0, 310, 0, 2),
-            Position = UDim2.new(0.5, -155, 0.5, 0)
-        })
-        tw1:Play()
-        tw1.Completed:Connect(function()
-            TweenService:Create(InfoFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-                Size = UDim2.new(0, 310, 0, 320),
-                Position = UDim2.new(0.5, -155, 0.5, -160)
-            }):Play()
-        end)
-    else
-        local tw2 = TweenService:Create(InfoFrame, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 310, 0, 2),
-            Position = UDim2.new(0.5, -155, 0.5, 0)
-        })
-        tw2:Play()
-        tw2.Completed:Connect(function()
-            local tw3 = TweenService:Create(InfoFrame, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                Size = UDim2.new(0, 0, 0, 2),
-                Position = UDim2.new(0.5, 0, 0.5, 0)
-            })
-            tw3:Play()
-            tw3.Completed:Connect(function() InfoFrame.Visible = false end)
-        end)
-    end
-end
+5. API PAGINATION
+   Scans deep into Roblox server list (up to 500 servers) to find unvisited instances.
 
-InfoBtn.MouseButton1Click:Connect(function() toggleInfoWindow(not InfoFrame.Visible) end)
-InfoClose.MouseButton1Click:Connect(function() toggleInfoWindow(false) end)
+Developed for ScriptBlox.]]
+
+InfoBtn.MouseButton1Click:Connect(function()
+    InfoOverlay.Visible = not InfoOverlay.Visible
+end)
+
+InfoClose.MouseButton1Click:Connect(function()
+    InfoOverlay.Visible = false
+end)
 
 local Line1 = Instance.new("Frame", Main)
 Line1.Size = UDim2.new(1, 0, 0, 1)
@@ -440,9 +387,9 @@ local function renderPlayers()
         Info.TextXAlignment = Enum.TextXAlignment.Left
         Info.BackgroundTransparency = 1
 
-        task.delay(index * 0.04, function()
+        task.delay(index * 0.03, function()
             if Card and Card.Parent then
-                TweenService:Create(Card, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                TweenService:Create(Card, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
                     Position = UDim2.new(0, 0, 0, 0)
                 }):Play()
             end
