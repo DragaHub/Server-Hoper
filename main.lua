@@ -3,14 +3,17 @@ local TeleportService = game:GetService("TeleportService")
 local Players = game:GetService("Players")
 local TextChatService = game:GetService("TextChatService")
 local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
 
 local RAW_URL = "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"
 local SETTINGS_FILE = "ServerFinderConfig.json"
+local VISITED_FILE = "ServerFinderVisited.json"
 
-local isHopping = false -- Флаг защиты от повторных краш-вызовов
+local isHopping = false
 
+-- Автоматическая очередь телепорта
 local function setQueue()
-    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    local q = queue_on_teleport or (getgenv and getgenv().queue_on_teleport)
     if q then
         pcall(function()
             q(string.format([[
@@ -21,6 +24,39 @@ local function setQueue()
     end
 end
 
+-- История посещенных серверов
+local function loadVisited()
+    if isfile and isfile(VISITED_FILE) then
+        local success, result = pcall(function()
+            return HttpService:JSONDecode(readfile(VISITED_FILE))
+        end)
+        if success and type(result) == "table" then
+            return result
+        end
+    end
+    return {}
+end
+
+local function saveVisited(data)
+    if writefile then
+        pcall(function()
+            writefile(VISITED_FILE, HttpService:JSONEncode(data))
+        end)
+    end
+end
+
+local visitedServers = loadVisited()
+visitedServers[game.JobId] = true
+
+-- Очистка истории, если сохраненных серверов больше 60
+local visitedCount = 0
+for _ in pairs(visitedServers) do visitedCount = visitedCount + 1 end
+if visitedCount > 60 then
+    visitedServers = {[game.JobId] = true}
+end
+saveVisited(visitedServers)
+
+-- Конфигурация
 local defaultSettings = {
     AutoHop = false,
     FilterDonators = true,
@@ -60,14 +96,21 @@ ScreenGui.ResetOnSpawn = false
 pcall(function() ScreenGui.Parent = CoreGui end)
 if not ScreenGui.Parent then ScreenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui") end
 
+-- Главное окно
 local Main = Instance.new("Frame", ScreenGui)
-Main.Size = UDim2.new(0, 330, 0, 480)
+Main.Size = UDim2.new(0, 330, 0, 0) -- Начинается с высоты 0 для анимации разворачивания
 Main.Position = UDim2.new(0.5, -165, 0.5, -240)
 Main.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 Main.BorderSizePixel = 1
 Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
 Main.Active = true
 Main.Draggable = true
+Main.ClipsDescendants = true
+
+-- Анимация появления GUI (CRT/Терминальное открытие)
+TweenService:Create(Main, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    Size = UDim2.new(0, 330, 0, 480)
+}):Play()
 
 local Title = Instance.new("TextLabel", Main)
 Title.Size = UDim2.new(1, -35, 0, 30)
@@ -79,6 +122,22 @@ Title.TextSize = 12
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.BackgroundTransparency = 1
 
+-- Ретро-анимация наведения на кнопки (Инверсия монохромного стиля)
+local function applyRetroHover(button)
+    button.MouseEnter:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            TextColor3 = Color3.fromRGB(0, 0, 0)
+        }):Play()
+    end)
+    button.MouseLeave:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+            BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+            TextColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+    end)
+end
+
 local CloseBtn = Instance.new("TextButton", Main)
 CloseBtn.Size = UDim2.new(0, 20, 0, 20)
 CloseBtn.Position = UDim2.new(1, -25, 0, 5)
@@ -89,10 +148,19 @@ CloseBtn.Text = "X"
 CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 CloseBtn.Font = Enum.Font.Code
 CloseBtn.TextSize = 12
+applyRetroHover(CloseBtn)
+
 CloseBtn.MouseButton1Click:Connect(function()
     config.AutoHop = false
     saveSettings(config)
-    ScreenGui:Destroy()
+    
+    local closeTween = TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+        Size = UDim2.new(0, 330, 0, 0)
+    })
+    closeTween:Play()
+    closeTween.Completed:Connect(function()
+        ScreenGui:Destroy()
+    end)
 end)
 
 local Line1 = Instance.new("Frame", Main)
@@ -111,12 +179,13 @@ local function createToggle(text, pos, key)
     Btn.Font = Enum.Font.Code
     Btn.TextSize = 10
     Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    
+    applyRetroHover(Btn)
+
     local function updateText()
         Btn.Text = (config[key] and "[X] " or "[ ] ") .. text
     end
     updateText()
-    
+
     Btn.MouseButton1Click:Connect(function()
         config[key] = not config[key]
         saveSettings(config)
@@ -148,6 +217,7 @@ SearchBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
 SearchBtn.Font = Enum.Font.Code
 SearchBtn.TextSize = 11
 SearchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+applyRetroHover(SearchBtn)
 
 local function updateBtnText()
     if config.AutoHop then
@@ -216,17 +286,19 @@ local function renderPlayers()
     Scroll.CanvasSize = UDim2.new(0, 0, 0, UIList.AbsoluteContentSize.Y + 6)
 end
 
+-- Поиск нового сервера без повторов
 local function executeHop()
     if isHopping then return end
     isHopping = true
 
-    SearchBtn.Text = "[ HOPPING... ]"
+    SearchBtn.Text = "[ SEARCHING NEW UNVISITED... ]"
     setQueue()
 
     local httpRequest = request or http_request or (syn and syn.request) or (http and http.request)
     local targetServer = nil
 
     if httpRequest then
+        -- Получаем список серверов
         local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100", game.PlaceId)
         local success, res = pcall(function() return httpRequest({Url = url, Method = "GET"}) end)
 
@@ -235,10 +307,14 @@ local function executeHop()
             if decSuccess and data and data.data then
                 local valid = {}
                 for _, s in ipairs(data.data) do
-                    if type(s) == "table" and s.playing and s.maxPlayers and s.playing < s.maxPlayers and s.id ~= game.JobId then
-                        table.insert(valid, s.id)
+                    if type(s) == "table" and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                        -- Фильтр: Исключаем текущий сервер И все ранее посещенные
+                        if s.id ~= game.JobId and not visitedServers[s.id] then
+                            table.insert(valid, s.id)
+                        end
                     end
                 end
+
                 if #valid > 0 then
                     targetServer = valid[math.random(1, #valid)]
                 end
@@ -246,20 +322,23 @@ local function executeHop()
         end
     end
 
-    -- Если смогли найти конкретный сервер через API
     if targetServer then
-        local tpSuccess = pcall(function()
+        visitedServers[targetServer] = true
+        saveVisited(visitedServers)
+
+        pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer, Players.LocalPlayer)
         end)
-        
-        -- Таймаут-фоллбэк: если за 5 секунд телепорт не произошел, делаем случайный хоп
+
         task.delay(5, function()
             if isHopping then
                 pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
             end
         end)
     else
-        -- Фоллбэк: если API Роблокса заблокировал запросы, прыгаем рандомно
+        -- Если незасеченных серверов в первом списке не осталось, сбрасываем историю и прыгаем случайно
+        visitedServers = {[game.JobId] = true}
+        saveVisited(visitedServers)
         pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
     end
 end
