@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 10
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.0"
+local VERSION = "2.1"
 
 local guiAlive = true
 local isHopping = false
@@ -433,33 +433,91 @@ end
 
 local function setupRetroButton(button)
     local isImage = button:IsA("ImageButton")
+    button.ClipsDescendants = true
     local scale = Instance.new("UIScale")
     scale.Scale = 1
     scale.Parent = button
 
-    local function setHover(hovered)
+    -- Diagonal light sweep that races across the button on hover.
+    local shine = Instance.new("Frame")
+    shine.Name = "Shine"
+    shine.AnchorPoint = Vector2.new(0.5, 0.5)
+    shine.Size = UDim2.new(0, 8, 1.8, 0)
+    shine.Position = UDim2.new(-0.15, 0, 0.5, 0)
+    shine.Rotation = 14
+    shine.BackgroundColor3 = WHITE
+    shine.BackgroundTransparency = 1
+    shine.BorderSizePixel = 0
+    shine.ZIndex = button.ZIndex + 2
+    shine.Parent = button
+
+    local hovered = false
+
+    local function sweepShine()
+        if not config.Animations or not button.Parent then return end
+        shine.BackgroundTransparency = 0.7
+        shine.Position = UDim2.new(-0.15, 0, 0.5, 0)
+        tween(shine, TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Position = UDim2.new(1.15, 0, 0.5, 0),
+        })
+        task.delay(0.34, function()
+            if shine.Parent then shine.BackgroundTransparency = 1 end
+        end)
+    end
+
+    -- Rectangular monochrome ripple bursting from the center on click.
+    local function ripple()
+        if not config.Animations or not button.Parent then return end
+        local bg = button.BackgroundColor3
+        local bright = (bg.R + bg.G + bg.B) / 3
+        local wave = Instance.new("Frame")
+        wave.Name = "Ripple"
+        wave.AnchorPoint = Vector2.new(0.5, 0.5)
+        wave.Position = UDim2.new(0.5, 0, 0.5, 0)
+        wave.Size = UDim2.new(0, 6, 0, 6)
+        wave.BackgroundColor3 = bright > 0.5 and BLACK or WHITE
+        wave.BackgroundTransparency = 0.55
+        wave.BorderSizePixel = 0
+        wave.ZIndex = button.ZIndex + 1
+        wave.Parent = button
+        tween(wave, TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(1.8, 0, 3.4, 0),
+            BackgroundTransparency = 1,
+        })
+        task.delay(0.34, function()
+            if wave.Parent then wave:Destroy() end
+        end)
+    end
+
+    local function setHover(state)
+        hovered = state
         if not guiAlive or not button.Parent then
             return
         end
-        local props = { BackgroundColor3 = hovered and WHITE or BLACK }
+        local props = { BackgroundColor3 = state and WHITE or BLACK }
         if isImage then
-            props.ImageColor3 = hovered and BLACK or WHITE
+            props.ImageColor3 = state and BLACK or WHITE
         else
-            props.TextColor3 = hovered and BLACK or WHITE
+            props.TextColor3 = state and BLACK or WHITE
         end
         tween(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), props)
     end
 
-    button.MouseEnter:Connect(function() setHover(true) end)
+    button.MouseEnter:Connect(function()
+        setHover(true)
+        sweepShine()
+        tween(scale, TweenInfo.new(0.1, Enum.EasingStyle.Quad), { Scale = 1.04 })
+    end)
     button.MouseLeave:Connect(function()
         setHover(false)
-        tween(scale, TweenInfo.new(0.08, Enum.EasingStyle.Back), { Scale = 1 })
+        tween(scale, TweenInfo.new(0.12, Enum.EasingStyle.Back), { Scale = 1 })
     end)
     button.MouseButton1Down:Connect(function()
-        tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.94 })
+        ripple()
+        tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.92 })
     end)
     button.MouseButton1Up:Connect(function()
-        tween(scale, TweenInfo.new(0.1, Enum.EasingStyle.Back), { Scale = 1 })
+        tween(scale, TweenInfo.new(0.14, Enum.EasingStyle.Back), { Scale = hovered and 1.04 or 1 })
     end)
 end
 
@@ -566,6 +624,66 @@ local function pulseBorder(frame)
     end)
 end
 
+-- CRT-style scanline that periodically sweeps the frame from top to bottom.
+local function attachScanline(frame)
+    local line = Instance.new("Frame")
+    line.Name = "Scanline"
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, 0, -2)
+    line.BackgroundColor3 = WHITE
+    line.BackgroundTransparency = 1
+    line.BorderSizePixel = 0
+    line.ZIndex = 40
+    line.Parent = frame
+    task.spawn(function()
+        while guiAlive and frame.Parent do
+            if frame.Visible and config.Animations then
+                line.BackgroundTransparency = 0.85
+                line.Position = UDim2.new(0, 0, 0, -2)
+                tween(line, TweenInfo.new(2.1, Enum.EasingStyle.Linear), {
+                    Position = UDim2.new(0, 0, 1, 2),
+                })
+                task.wait(2.15)
+                line.BackgroundTransparency = 1
+            else
+                line.BackgroundTransparency = 1
+            end
+            task.wait(RNG:NextNumber(2.2, 3.4))
+        end
+    end)
+    return line
+end
+
+-- Occasional 2-frame text corruption for that broken-terminal look.
+local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*" }
+local function attachTextGlitch(label)
+    task.spawn(function()
+        while guiAlive and label.Parent do
+            task.wait(RNG:NextNumber(4, 9))
+            if not (guiAlive and label.Parent) then break end
+            if config.Animations and label.Visible then
+                local original = label.Text
+                for _ = 1, 2 do
+                    if not label.Parent then return end
+                    local chars = {}
+                    for i = 1, #original do
+                        chars[i] = string.sub(original, i, i)
+                    end
+                    for _ = 1, RNG:NextInteger(1, 3) do
+                        local idx = RNG:NextInteger(1, #chars)
+                        chars[idx] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
+                    end
+                    label.Text = table.concat(chars)
+                    task.wait(0.05)
+                    label.Text = original
+                    task.wait(0.06)
+                end
+                label.Text = original
+            end
+        end
+    end)
+end
+
 local function createWindow(opts)
     local win = Instance.new("Frame")
     win.Name = opts.Name
@@ -632,6 +750,8 @@ local function createWindow(opts)
 
     makeDraggable(win, titleBar)
     pulseBorder(win)
+    attachScanline(win)
+    attachTextGlitch(title)
 
     win.InputBegan:Connect(function()
         raiseWindow(win)
@@ -645,11 +765,17 @@ local function createWindow(opts)
             win.Visible = false
             return
         end
-        tween(windowScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = windowScaleTarget * 0.94 })
-        tween(win, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 })
-        task.delay(0.12, function()
+        tween(windowScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Scale = windowScaleTarget * 0.85,
+        })
+        tween(win, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
+            BackgroundTransparency = 1,
+            Rotation = RNG:NextInteger(0, 1) == 0 and -2.5 or 2.5,
+        })
+        task.delay(0.16, function()
             if win.Parent and visibilityToken == token then
                 win.Visible = false
+                win.Rotation = 0
             end
         end)
     end
@@ -663,12 +789,14 @@ local function createWindow(opts)
         clampToViewport(win)
         if config.Animations then
             win.BackgroundTransparency = 1
-            windowScale.Scale = windowScaleTarget * 0.92
+            win.Rotation = RNG:NextInteger(0, 1) == 0 and -3 or 3
+            windowScale.Scale = windowScaleTarget * 0.8
         end
-        tween(win, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        tween(win, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
             BackgroundTransparency = 0,
+            Rotation = 0,
         })
-        tween(windowScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        tween(windowScale, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
             Scale = windowScaleTarget,
         })
     end
@@ -718,13 +846,23 @@ MainScale.Parent = Main
 
 Main.BackgroundTransparency = config.Animations and 1 or 0
 Main.ZIndex = 1
-tween(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+if config.Animations then
+    Main.Rotation = -4
+    Main.Position = Main.Position + UDim2.fromOffset(0, 26)
+    MainScale.Scale = responsiveMainScale * 0.7
+end
+tween(Main, TweenInfo.new(0.34, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
     BackgroundTransparency = 0,
+    Rotation = 0,
 })
-tween(MainScale, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+tween(Main, TweenInfo.new(0.38, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+    Position = UDim2.new(0.5, -170, 0.5, -270),
+})
+tween(MainScale, TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
     Scale = responsiveMainScale,
 })
 pulseBorder(Main)
+attachScanline(Main)
 
 local TitleBar = Instance.new("Frame")
 TitleBar.Name = "TitleBar"
@@ -744,6 +882,28 @@ Title.TextSize = 12
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.BackgroundTransparency = 1
 Title.Parent = TitleBar
+
+-- Boot-style typewriter reveal for the main title, then occasional glitches.
+do
+    local fullTitle = Title.Text
+    if config.Animations then
+        task.spawn(function()
+            Title.Text = ""
+            task.wait(0.25)
+            local visible = ""
+            for i = 1, #fullTitle do
+                if not (guiAlive and Title.Parent) then return end
+                visible = string.sub(fullTitle, 1, i)
+                Title.Text = visible .. (i < #fullTitle and "_" or "")
+                task.wait(0.022)
+            end
+            Title.Text = fullTitle
+            attachTextGlitch(Title)
+        end)
+    else
+        attachTextGlitch(Title)
+    end
+end
 
 local function makeHeaderButton(text, xOffset)
     local btn = Instance.new("TextButton")
@@ -783,30 +943,73 @@ local SettingsBtn = makeHeaderImageButton(5912368781, -75)
 local InfoBtn = makeHeaderButton("?", -50)
 local CloseBtn = makeHeaderButton("X", -25)
 
+local Body -- created below; forward-declared for the close animation
+
+local closing = false
 CloseBtn.MouseButton1Click:Connect(function()
+    if closing then return end
+    closing = true
     config.AutoHop = false
     saveSettings(config, true)
-    guiAlive = false
-    ScreenGui:Destroy()
+    if not config.Animations then
+        guiAlive = false
+        ScreenGui:Destroy()
+        return
+    end
+    -- CRT power-off: collapse to a horizontal line, then to a dot, then vanish.
+    for _, child in ipairs(ScreenGui:GetChildren()) do
+        if child:IsA("Frame") and child ~= Main then
+            child.Visible = false
+        end
+    end
+    if Body then Body.Visible = false end
+    local absPos = Main.AbsolutePosition
+    local absSize = Main.AbsoluteSize
+    local centerX = absPos.X + absSize.X / 2
+    local centerY = absPos.Y + absSize.Y / 2
+    tween(Main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+        Size = UDim2.fromOffset(absSize.X, 2),
+        Position = UDim2.fromOffset(absPos.X, centerY),
+        BackgroundColor3 = WHITE,
+    })
+    task.delay(0.17, function()
+        if not Main.Parent then return end
+        tween(Main, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.fromOffset(4, 2),
+            Position = UDim2.fromOffset(centerX, centerY),
+        })
+        task.delay(0.16, function()
+            guiAlive = false
+            if ScreenGui.Parent then ScreenGui:Destroy() end
+        end)
+    end)
 end)
 
-local Body = Instance.new("Frame")
+Body = Instance.new("Frame")
 Body.Name = "Body"
 Body.Size = UDim2.new(1, 0, 1, -30)
 Body.Position = UDim2.new(0, 0, 0, 30)
 Body.BackgroundTransparency = 1
 Body.Parent = Main
 
+local minimizeToken = 0
 MinBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
-    Body.Visible = not minimized
+    minimizeToken = minimizeToken + 1
+    local token = minimizeToken
     if minimized then
-        tween(Main, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = MINIMIZED_SIZE })
+        Body.Visible = false
+        tween(Main, TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Size = MINIMIZED_SIZE })
         MinBtn.Text = "+"
     else
-        Body.Visible = true
-        tween(Main, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = EXPANDED_SIZE })
+        tween(Main, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = EXPANDED_SIZE })
         MinBtn.Text = "_"
+        -- Reveal the body once the frame is mostly unrolled.
+        task.delay(config.Animations and 0.12 or 0, function()
+            if guiAlive and token == minimizeToken and not minimized then
+                Body.Visible = true
+            end
+        end)
     end
 end)
 
@@ -822,6 +1025,13 @@ local function refreshSettingControls()
     for _, refresh in ipairs(settingRefreshers) do
         refresh()
     end
+end
+
+-- Short green border blink confirming that a setting was changed and saved.
+local function confirmBlink(instance)
+    if not config.Animations or not instance or not instance.Parent then return end
+    instance.BorderColor3 = GREEN
+    tween(instance, TweenInfo.new(0.45, Enum.EasingStyle.Quad), { BorderColor3 = WHITE })
 end
 
 local function createToggle(parent, text, pos, size, key)
@@ -850,6 +1060,7 @@ local function createToggle(parent, text, pos, size, key)
         config[key] = not config[key]
         saveSettings(config)
         updateText()
+        confirmBlink(btn)
     end)
     return btn
 end
@@ -896,9 +1107,20 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
         btn.Parent = frame
         setupRetroButton(btn)
         btn.MouseButton1Click:Connect(function()
+            local before = config[key]
             config[key] = math.clamp(config[key] + delta, minValue, maxValue)
             saveSettings(config)
             refresh()
+            if config[key] ~= before then
+                confirmBlink(frame)
+                -- Nudge the caption in the direction of the change.
+                if config.Animations and caption.Parent then
+                    caption.Position = UDim2.new(0, delta > 0 and 10 or 2, 0, 0)
+                    tween(caption, TweenInfo.new(0.18, Enum.EasingStyle.Back), {
+                        Position = UDim2.new(0, 6, 0, 0),
+                    })
+                end
+            end
         end)
     end
 
@@ -935,6 +1157,7 @@ local function createSelector(parent, label, pos, size, key, values, labels)
         config[key] = values[(current % #values) + 1]
         saveSettings(config)
         refresh()
+        confirmBlink(btn)
     end)
     return btn
 end
@@ -989,7 +1212,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.0
+> SERVER FINDER v2.1
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1030,9 +1253,14 @@ InfoTextLabel.Text = [[
    chat events are deduplicated and file saves debounced.
 
 9. GUI
-   Animated windows, progress bar, notifications,
-   responsive scaling and viewport-safe dragging.
-   Press RightShift to hide/show the entire interface.
+   Fully animated retro-terminal interface: CRT
+   scanlines, typewriter title, glitch effects,
+   button shine + ripple, sliding toasts with
+   lifetime bars, staggered player cards, warp
+   strobe on teleport, error shake, match bounce
+   and a CRT power-off close animation.
+   Press RightShift to hide/show the interface.
+   ANIMATIONS toggle in Settings disables it all.
 
 10. HOP ONCE
    Jumps without changing the saved auto-loop setting.
@@ -1217,6 +1445,35 @@ ProgressFill.BackgroundColor3 = WHITE
 ProgressFill.BorderSizePixel = 0
 ProgressFill.Parent = ProgressTrack
 
+-- Sliding highlight that keeps the bar alive while work is in progress.
+local ProgressGlow = Instance.new("Frame")
+ProgressGlow.Size = UDim2.new(0, 26, 1, 0)
+ProgressGlow.Position = UDim2.new(-0.12, 0, 0, 0)
+ProgressGlow.BackgroundColor3 = WHITE
+ProgressGlow.BackgroundTransparency = 1
+ProgressGlow.BorderSizePixel = 0
+ProgressGlow.ZIndex = 2
+ProgressGlow.Parent = ProgressTrack
+
+task.spawn(function()
+    while guiAlive and ProgressTrack.Parent do
+        local busy = ProgressFill.Size.X.Scale > 0.001 and ProgressFill.Size.X.Scale < 0.999
+        if config.Animations and Main.Visible and not minimized and busy then
+            ProgressGlow.BackgroundTransparency = 0.65
+            ProgressGlow.Position = UDim2.new(-0.12, 0, 0, 0)
+            tween(ProgressGlow, TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+                Position = UDim2.new(1.02, 0, 0, 0),
+            })
+            task.wait(0.95)
+            ProgressGlow.BackgroundTransparency = 1
+            task.wait(0.25)
+        else
+            ProgressGlow.BackgroundTransparency = 1
+            task.wait(0.4)
+        end
+    end
+end)
+
 local function setProgress(value, color, instant)
     value = math.clamp(tonumber(value) or 0, 0, 1)
     ProgressFill.BackgroundColor3 = color or WHITE
@@ -1230,6 +1487,14 @@ local function setProgress(value, color, instant)
         ProgressFill.Size = target.Size
     else
         tween(ProgressFill, TweenInfo.new(0.18, Enum.EasingStyle.Quad), target)
+    end
+    -- Completion pulse: the whole track blinks once in the result colour.
+    if value >= 1 and config.Animations then
+        local blink = color or WHITE
+        ProgressTrack.BackgroundColor3 = blink
+        tween(ProgressTrack, TweenInfo.new(0.45, Enum.EasingStyle.Quad), {
+            BackgroundColor3 = Color3.fromRGB(35, 35, 35),
+        })
     end
 end
 
@@ -1301,42 +1566,113 @@ notify = function(message, color)
         table.remove(existing, 1)
     end
     toastCounter = toastCounter + 1
+    local accent = color or WHITE
+
+    -- Transparent holder keeps its place in the list while the label slides.
+    local holder = Instance.new("Frame")
+    holder.Name = "Toast"
+    holder.Size = UDim2.new(1, 0, 0, 34)
+    holder.BackgroundTransparency = 1
+    holder.LayoutOrder = toastCounter
+    holder.ZIndex = 100
+    holder.Parent = ToastHost
+
     local toast = Instance.new("TextLabel")
-    toast.Name = "Toast"
-    toast.Size = UDim2.new(1, 0, 0, 34)
+    toast.Size = UDim2.new(1, 0, 1, 0)
+    toast.Position = config.Animations and UDim2.new(1.1, 0, 0, 0) or UDim2.new(0, 0, 0, 0)
     toast.BackgroundColor3 = BLACK
-    toast.BackgroundTransparency = config.Animations and 1 or 0.08
+    toast.BackgroundTransparency = 0.08
     toast.BorderSizePixel = 1
-    toast.BorderColor3 = color or WHITE
+    toast.BorderColor3 = accent
     toast.Font = Enum.Font.Code
     toast.TextSize = 10
-    toast.TextColor3 = color or WHITE
+    toast.TextColor3 = accent
     toast.TextXAlignment = Enum.TextXAlignment.Left
     toast.TextTruncate = Enum.TextTruncate.AtEnd
     toast.Text = "  > " .. tostring(message)
-    toast.LayoutOrder = toastCounter
     toast.ZIndex = 100
-    toast.Parent = ToastHost
+    toast.ClipsDescendants = true
+    toast.Parent = holder
 
-    local scale = Instance.new("UIScale")
-    scale.Scale = config.Animations and 0.9 or 1
-    scale.Parent = toast
-    tween(toast, TweenInfo.new(0.18, Enum.EasingStyle.Quad), { BackgroundTransparency = 0.08 })
-    tween(scale, TweenInfo.new(0.22, Enum.EasingStyle.Back), { Scale = 1 })
+    -- Accent stripe on the left edge that unfolds vertically.
+    local stripe = Instance.new("Frame")
+    stripe.Size = UDim2.new(0, 3, config.Animations and 0 or 1, 0)
+    stripe.Position = UDim2.new(0, 0, 0.5, 0)
+    stripe.AnchorPoint = Vector2.new(0, 0.5)
+    stripe.BackgroundColor3 = accent
+    stripe.BorderSizePixel = 0
+    stripe.ZIndex = 101
+    stripe.Parent = toast
+
+    -- Lifetime bar draining along the bottom edge.
+    local life = Instance.new("Frame")
+    life.Size = UDim2.new(1, 0, 0, 1)
+    life.Position = UDim2.new(0, 0, 1, -1)
+    life.BackgroundColor3 = accent
+    life.BackgroundTransparency = 0.35
+    life.BorderSizePixel = 0
+    life.ZIndex = 101
+    life.Parent = toast
+
+    tween(toast, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0, 0, 0, 0),
+    })
+    tween(stripe, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 3, 1, 0),
+    })
+    tween(life, TweenInfo.new(3.2, Enum.EasingStyle.Linear), {
+        Size = UDim2.new(0, 0, 0, 1),
+    })
+
     task.delay(3.2, function()
-        if not toast.Parent then return end
-        tween(toast, TweenInfo.new(0.16), { BackgroundTransparency = 1, TextTransparency = 1 })
-        tween(scale, TweenInfo.new(0.16), { Scale = 0.92 })
-        task.wait(config.Animations and 0.17 or 0)
-        if toast.Parent then toast:Destroy() end
+        if not holder.Parent then return end
+        tween(toast, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Position = UDim2.new(1.1, 0, 0, 0),
+            BackgroundTransparency = 1,
+            TextTransparency = 1,
+        })
+        -- Collapse the holder so remaining toasts glide up smoothly.
+        tween(holder, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.new(1, 0, 0, 0),
+        })
+        task.wait(config.Animations and 0.24 or 0)
+        if holder.Parent then holder:Destroy() end
     end)
 end
 
 setStatus = function(text)
     if Status and Status.Parent then
-        Status.Text = "> " .. tostring(text)
+        local newText = "> " .. tostring(text)
+        local current = Status.Text
+        if string.sub(current, -2) == " _" then
+            current = string.sub(current, 1, -3)
+        end
+        if current ~= newText then
+            Status.Text = newText
+            -- Quick flash so status changes catch the eye.
+            if config.Animations then
+                Status.TextColor3 = WHITE
+                tween(Status, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { TextColor3 = DIM })
+            end
+        end
     end
 end
+
+-- Blinking terminal cursor appended to the idle status line.
+task.spawn(function()
+    local showCursor = false
+    while guiAlive and Status.Parent do
+        if config.Animations and Main.Visible and not minimized then
+            showCursor = not showCursor
+            local base = Status.Text
+            if string.sub(base, -2) == " _" then
+                base = string.sub(base, 1, -3)
+            end
+            Status.Text = showCursor and (base .. " _") or base
+        end
+        task.wait(0.55)
+    end
+end)
 
 updateBtnText = function()
     if config.AutoHop then
@@ -1451,17 +1787,20 @@ local function refreshCard(pl)
     end
 end
 
+local cardEntryStagger = 0
 local function buildCard(pl)
     local card = Instance.new("Frame")
     card.Name = "P_" .. tostring(pl.UserId)
     card.Size = UDim2.new(1, -6, 0, 34)
     card.BackgroundColor3 = BLACK
+    card.BackgroundTransparency = config.Animations and 1 or 0
     card.BorderSizePixel = 1
-    card.BorderColor3 = WHITE
+    card.BorderColor3 = config.Animations and MUTED or WHITE
+    card.ClipsDescendants = true
     card.Parent = Scroll
 
     local cardScale = Instance.new("UIScale")
-    cardScale.Scale = config.Animations and 0.96 or 1
+    cardScale.Scale = config.Animations and 0.88 or 1
     cardScale.Parent = card
 
     local avatar = Instance.new("ImageLabel")
@@ -1470,6 +1809,7 @@ local function buildCard(pl)
     avatar.BackgroundColor3 = BLACK
     avatar.BorderSizePixel = 1
     avatar.BorderColor3 = WHITE
+    avatar.ImageTransparency = config.Animations and 1 or 0
     avatar.Parent = card
 
     local info = Instance.new("TextLabel")
@@ -1482,11 +1822,45 @@ local function buildCard(pl)
     info.TextXAlignment = Enum.TextXAlignment.Left
     info.TextTruncate = Enum.TextTruncate.AtEnd
     info.BackgroundTransparency = 1
+    info.TextTransparency = config.Animations and 1 or 0
     info.Parent = card
 
     local record = { frame = card, avatar = avatar, info = info, player = pl }
     playerCards[pl.UserId] = record
-    tween(cardScale, TweenInfo.new(0.16, Enum.EasingStyle.Back), { Scale = 1 })
+
+    -- Staggered entry: each new card pops in slightly after the previous one.
+    cardEntryStagger = math.min(cardEntryStagger + 0.03, 0.36)
+    local myDelay = cardEntryStagger
+    task.delay(config.Animations and myDelay or 0, function()
+        cardEntryStagger = math.max(0, cardEntryStagger - 0.03)
+        if not card.Parent then return end
+        tween(card, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
+            BackgroundTransparency = 0,
+            BorderColor3 = WHITE,
+        })
+        tween(cardScale, TweenInfo.new(0.28, Enum.EasingStyle.Back), { Scale = 1 })
+        tween(info, TweenInfo.new(0.24, Enum.EasingStyle.Quad), { TextTransparency = 0 })
+    end)
+
+    -- Subtle hover highlight without stealing input from the scroll frame.
+    card.MouseEnter:Connect(function()
+        if card.Parent then
+            tween(card, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+                BackgroundColor3 = Color3.fromRGB(26, 26, 26),
+            })
+            tween(info, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+                Position = UDim2.new(0, 40, 0, 0),
+            })
+        end
+    end)
+    card.MouseLeave:Connect(function()
+        if card.Parent then
+            tween(card, TweenInfo.new(0.16, Enum.EasingStyle.Quad), { BackgroundColor3 = BLACK })
+            tween(info, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
+                Position = UDim2.new(0, 36, 0, 0),
+            })
+        end
+    end)
 
     task.spawn(function()
         local ok, content, isReady = pcall(function()
@@ -1498,6 +1872,9 @@ local function buildCard(pl)
         end)
         if ok and isReady and avatar.Parent then
             avatar.Image = content
+            tween(avatar, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { ImageTransparency = 0 })
+        elseif avatar.Parent then
+            avatar.ImageTransparency = 0
         end
     end)
 
@@ -1534,8 +1911,34 @@ local function renderPlayers()
     end
     for userId, record in pairs(playerCards) do
         if not present[userId] then
-            if record.frame.Parent then record.frame:Destroy() end
+            local frame = record.frame
             playerCards[userId] = nil
+            if frame.Parent then
+                if config.Animations then
+                    -- Slide the departing card out to the left and fade its content.
+                    local scale = frame:FindFirstChildOfClass("UIScale")
+                    tween(frame, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                        BackgroundTransparency = 1,
+                        BorderColor3 = BLACK,
+                    })
+                    if scale then
+                        tween(scale, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                            Scale = 0.82,
+                        })
+                    end
+                    if record.info and record.info.Parent then
+                        tween(record.info, TweenInfo.new(0.18), { TextTransparency = 1 })
+                    end
+                    if record.avatar and record.avatar.Parent then
+                        tween(record.avatar, TweenInfo.new(0.18), { ImageTransparency = 1 })
+                    end
+                    task.delay(0.22, function()
+                        if frame.Parent then frame:Destroy() end
+                    end)
+                else
+                    frame:Destroy()
+                end
+            end
         end
     end
     updateStats()
@@ -1756,23 +2159,60 @@ end
 
 local function flashMatch()
     task.spawn(function()
+        -- Celebration: border strobes green while the window does a happy bounce.
+        if config.Animations and Main.Parent then
+            tween(MainScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {
+                Scale = responsiveMainScale * 1.03,
+            })
+            task.delay(0.13, function()
+                if guiAlive and Main.Parent then
+                    tween(MainScale, TweenInfo.new(0.3, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), {
+                        Scale = responsiveMainScale,
+                    })
+                end
+            end)
+        end
         for _ = 1, 3 do
             if not (guiAlive and Main.Parent) then return end
             tween(Main, TweenInfo.new(0.12), { BorderColor3 = GREEN })
+            tween(Title, TweenInfo.new(0.12), { TextColor3 = GREEN })
             task.wait(0.14)
             tween(Main, TweenInfo.new(0.12), { BorderColor3 = WHITE })
+            tween(Title, TweenInfo.new(0.12), { TextColor3 = WHITE })
             task.wait(0.14)
+        end
+    end)
+end
+
+-- Horizontal error shake so failures are felt, not just read.
+local function shakeMain()
+    if not config.Animations or not Main.Parent then return end
+    task.spawn(function()
+        local origin = Main.Position
+        local offsets = { 7, -6, 5, -3, 0 }
+        for _, dx in ipairs(offsets) do
+            if not (guiAlive and Main.Parent) then return end
+            tween(Main, TweenInfo.new(0.045, Enum.EasingStyle.Quad), {
+                Position = origin + UDim2.fromOffset(dx, 0),
+            })
+            task.wait(0.05)
+        end
+        if guiAlive and Main.Parent then
+            tween(Main, TweenInfo.new(0.05), { Position = origin })
         end
     end)
 end
 
 local function startSearchSpinner(token)
     task.spawn(function()
-        local frames = { "[ / ] SEARCHING...", "[ - ] SEARCHING...", "[ \\ ] SEARCHING...", "[ | ] SEARCHING..." }
-        local idx = 1
+        local spin = { "/", "-", "\\", "|" }
+        local dots = { "   ", ".  ", ".. ", "..." }
+        local idx = 0
         while hopStillActive(token) do
-            SearchBtn.Text = frames[idx]
-            idx = (idx % #frames) + 1
+            idx = idx + 1
+            local s = spin[(idx - 1) % #spin + 1]
+            local d = dots[math.floor((idx - 1) / 3) % #dots + 1]
+            SearchBtn.Text = "[ " .. s .. " ] SEARCHING" .. d
             task.wait(0.12)
         end
         if guiAlive and token == hopToken then updateBtnText() end
@@ -1810,6 +2250,7 @@ local function failHop(token, message, serverId)
     updateBtnText()
     updateStats()
     notify(message, RED)
+    shakeMain()
     retryAuto(token, 1.5)
 end
 
@@ -1860,6 +2301,20 @@ executeHop = function()
     if target.ping then details = details .. string.format(" %dms", math.floor(target.ping)) end
     setStatus("teleport " .. string.sub(target.id, 1, 8) .. ".. | " .. details)
     notify("Server selected: " .. details, GREEN)
+
+    -- Warp charge-up: border strobe accelerating before the actual teleport call.
+    if config.Animations and Main.Parent then
+        task.spawn(function()
+            local delays = { 0.16, 0.12, 0.08, 0.05 }
+            for _, d in ipairs(delays) do
+                if not (guiAlive and Main.Parent) then return end
+                tween(Main, TweenInfo.new(d, Enum.EasingStyle.Quad), { BorderColor3 = GREEN })
+                task.wait(d)
+                tween(Main, TweenInfo.new(d, Enum.EasingStyle.Quad), { BorderColor3 = WHITE })
+                task.wait(d)
+            end
+        end)
+    end
 
     local ok, teleportError = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
@@ -2085,9 +2540,19 @@ rememberConnection(UserInputService.InputBegan:Connect(function(input, processed
         SettingsWin.Frame.Visible = false
         ToastHost.Visible = false
         if config.Animations then
-            tween(MainScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = responsiveMainScale * 0.94 })
-            task.delay(0.12, function()
-                if guiAlive and not interfaceVisible then Main.Visible = false end
+            tween(MainScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+                Scale = responsiveMainScale * 0.82,
+            })
+            tween(Main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                BackgroundTransparency = 1,
+                Rotation = 3,
+            })
+            task.delay(0.16, function()
+                if guiAlive and not interfaceVisible then
+                    Main.Visible = false
+                    Main.Rotation = 0
+                    Main.BackgroundTransparency = 0
+                end
             end)
         else
             Main.Visible = false
@@ -2095,8 +2560,16 @@ rememberConnection(UserInputService.InputBegan:Connect(function(input, processed
     else
         Main.Visible = true
         ToastHost.Visible = true
-        if config.Animations then MainScale.Scale = responsiveMainScale * 0.92 end
-        tween(MainScale, TweenInfo.new(0.2, Enum.EasingStyle.Back), { Scale = responsiveMainScale })
+        if config.Animations then
+            MainScale.Scale = responsiveMainScale * 0.82
+            Main.BackgroundTransparency = 1
+            Main.Rotation = -3
+        end
+        tween(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+            BackgroundTransparency = 0,
+            Rotation = 0,
+        })
+        tween(MainScale, TweenInfo.new(0.26, Enum.EasingStyle.Back), { Scale = responsiveMainScale })
         clampToViewport(Main)
     end
 end))
