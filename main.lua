@@ -2,6 +2,7 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local Players = game:GetService("Players")
 local TextChatService = game:GetService("TextChatService")
+local LocalizationService = game:GetService("LocalizationService")
 local CoreGui = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -124,6 +125,8 @@ local defaultSettings = {
     MinPlayers = 3,
     AnalyzeSeconds = 5,
     PreferFull = true,
+    PeopleRegion = "ANY",
+    MinRegionPercent = 35,
 }
 
 local function loadSettings()
@@ -151,6 +154,17 @@ local function loadSettings()
         cfg.AnalyzeSeconds = defaultSettings.AnalyzeSeconds
     end
     cfg.AnalyzeSeconds = math.clamp(math.floor(cfg.AnalyzeSeconds), 2, 15)
+    local validRegions = {
+        ANY = true, RUSSIAN = true, CIS = true, EUROPE = true,
+        ["N.AMERICA"] = true, ["S.AMERICA"] = true, ASIA = true, OCEANIA = true,
+    }
+    if type(cfg.PeopleRegion) ~= "string" or not validRegions[cfg.PeopleRegion] then
+        cfg.PeopleRegion = defaultSettings.PeopleRegion
+    end
+    if type(cfg.MinRegionPercent) ~= "number" then
+        cfg.MinRegionPercent = defaultSettings.MinRegionPercent
+    end
+    cfg.MinRegionPercent = math.clamp(math.floor(cfg.MinRegionPercent), 10, 100)
     return cfg
 end
 
@@ -163,6 +177,50 @@ local function saveSettings(cfg)
 end
 
 local config = loadSettings()
+
+-- Roblox does not publish the physical datacenter region in the public server list.
+-- Instead, this filter evaluates the countries/language of players after joining.
+local REGION_ORDER = { "ANY", "RUSSIAN", "CIS", "EUROPE", "N.AMERICA", "S.AMERICA", "ASIA", "OCEANIA" }
+local REGION_LABELS = {
+    ANY = "ANY", RUSSIAN = "RUSSIAN", CIS = "RU / CIS", EUROPE = "EUROPE",
+    ["N.AMERICA"] = "N. AMERICA", ["S.AMERICA"] = "S. AMERICA", ASIA = "ASIA", OCEANIA = "OCEANIA",
+}
+local REGION_COUNTRIES = {
+    RUSSIAN = { RU=true, BY=true, KZ=true, KG=true },
+    CIS = { RU=true, BY=true, KZ=true, KG=true, AM=true, AZ=true, MD=true, TJ=true, TM=true, UZ=true, UA=true },
+    EUROPE = { AL=true, AD=true, AT=true, BE=true, BA=true, BG=true, HR=true, CY=true, CZ=true, DK=true, EE=true, FI=true, FR=true, DE=true, GR=true, HU=true, IS=true, IE=true, IT=true, LV=true, LI=true, LT=true, LU=true, MT=true, MC=true, ME=true, NL=true, MK=true, NO=true, PL=true, PT=true, RO=true, SM=true, RS=true, SK=true, SI=true, ES=true, SE=true, CH=true, GB=true, VA=true },
+    ["N.AMERICA"] = { US=true, CA=true, MX=true, GT=true, BZ=true, SV=true, HN=true, NI=true, CR=true, PA=true, CU=true, JM=true, HT=true, DO=true, BS=true, BB=true, TT=true },
+    ["S.AMERICA"] = { AR=true, BO=true, BR=true, CL=true, CO=true, EC=true, GY=true, PY=true, PE=true, SR=true, UY=true, VE=true },
+    ASIA = { CN=true, HK=true, MO=true, JP=true, KR=true, TW=true, IN=true, ID=true, MY=true, PH=true, SG=true, TH=true, VN=true, PK=true, BD=true, LK=true, NP=true, MN=true, AE=true, SA=true, IL=true, TR=true, GE=true },
+    OCEANIA = { AU=true, NZ=true, FJ=true, PG=true, WS=true, TO=true },
+}
+
+local countryCache = {}
+local countryLookupInFlight = {}
+
+local function countryMatchesRegion(code, region)
+    if region == "ANY" then return true end
+    code = type(code) == "string" and string.upper(code) or nil
+    return code ~= nil and REGION_COUNTRIES[region] ~= nil and REGION_COUNTRIES[region][code] == true
+end
+
+local function lookupCountry(pl)
+    if not pl or pl == LocalPlayer then return nil end
+    local cached = countryCache[pl.UserId]
+    if cached ~= nil then return cached ~= false and cached or nil end
+    if countryLookupInFlight[pl.UserId] then return nil end
+    countryLookupInFlight[pl.UserId] = true
+    local ok, code = pcall(function()
+        return LocalizationService:GetCountryRegionForPlayerAsync(pl)
+    end)
+    countryLookupInFlight[pl.UserId] = nil
+    if ok and type(code) == "string" and #code == 2 then
+        countryCache[pl.UserId] = string.upper(code)
+        return countryCache[pl.UserId]
+    end
+    countryCache[pl.UserId] = false
+    return nil
+end
 
 if CoreGui:FindFirstChild("ClassicServerFinder") then
     CoreGui.ClassicServerFinder:Destroy()
@@ -552,7 +610,7 @@ local function createToggle(parent, text, pos, size, key)
     return btn
 end
 
-local function createStepper(parent, label, pos, size, key, minValue, maxValue, suffix)
+local function createStepper(parent, label, pos, size, key, minValue, maxValue, suffix, step)
     local frame = Instance.new("Frame")
     frame.Size = size
     frame.Position = pos
@@ -597,9 +655,38 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
         end)
     end
 
-    makeStep("-", -44, -1)
-    makeStep("+", -22, 1)
+    step = step or 1
+    makeStep("-", -44, -step)
+    makeStep("+", -22, step)
     return frame
+end
+
+local function createSelector(parent, label, pos, size, key, values, labels)
+    local btn = Instance.new("TextButton")
+    btn.Size = size
+    btn.Position = pos
+    btn.BackgroundColor3 = BLACK
+    btn.BorderSizePixel = 1
+    btn.BorderColor3 = WHITE
+    btn.Font = Enum.Font.Code
+    btn.TextSize = 10
+    btn.TextColor3 = WHITE
+    btn.AutoButtonColor = false
+    btn.Parent = parent
+    setupRetroButton(btn)
+
+    local function refresh()
+        btn.Text = label .. ": <  " .. (labels[config[key]] or config[key]) .. "  >"
+    end
+    refresh()
+
+    btn.MouseButton1Click:Connect(function()
+        local current = table.find(values, config[key]) or 1
+        config[key] = values[(current % #values) + 1]
+        saveSettings(config)
+        refresh()
+    end)
+    return btn
 end
 
 local function hint(parent, text, pos)
@@ -676,7 +763,19 @@ InfoTextLabel.Text = [[
    Walks several pages of the public servers
    API, retries 429/errors, encodes cursors.
 
-8. HOP ONCE
+8. PEOPLE REGION
+   After joining, checks available Roblox country
+   codes and observed chat language. RUSSIAN also
+   recognizes Cyrillic chat. Unknown countries are
+   ignored instead of counted as a mismatch.
+
+9. SERVER REGION LIMITATION
+   Roblox's public server API does not expose the
+   physical datacenter. The selected region means
+   the server audience (people), not a fake host
+   location. Filtering happens after each join.
+
+10. HOP ONCE
    Jump to another server without enabling
    the auto-loop.
 
@@ -689,8 +788,8 @@ InfoTextLabel.Parent = InfoScroll
 local SettingsWin = createWindow({
     Name = "SettingsWindow",
     Title = "[ SETTINGS ]",
-    Size = UDim2.new(0, 300, 0, 292),
-    Position = UDim2.new(0.5, -486, 0.5, -146),
+    Size = UDim2.new(0, 300, 0, 398),
+    Position = UDim2.new(0.5, -486, 0.5, -199),
 })
 
 createToggle(SettingsWin.Body, "DONATORS", UDim2.new(0, 8, 0, 10), UDim2.new(1, -16, 0, 26), "FilterDonators")
@@ -707,6 +806,12 @@ hint(SettingsWin.Body, "skip quieter servers below this", UDim2.new(0, 8, 0, 184
 
 createStepper(SettingsWin.Body, "ANALYZE", UDim2.new(0, 8, 0, 204), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 15, "s")
 hint(SettingsWin.Body, "seconds to listen after join", UDim2.new(0, 8, 0, 232))
+
+createSelector(SettingsWin.Body, "PEOPLE REGION", UDim2.new(0, 8, 0, 254), UDim2.new(1, -16, 0, 26), "PeopleRegion", REGION_ORDER, REGION_LABELS)
+hint(SettingsWin.Body, "server audience; click to choose", UDim2.new(0, 8, 0, 282))
+
+createStepper(SettingsWin.Body, "REGION SHARE", UDim2.new(0, 8, 0, 304), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
+hint(SettingsWin.Body, "minimum share among detected players", UDim2.new(0, 8, 0, 332))
 
 local function placeBeside(win, xOffset)
     local mainPos = Main.AbsolutePosition
@@ -836,29 +941,52 @@ local function updateStats()
 end
 
 local chatMessageCount = 0
+local russianChatCount = 0
 
-local function bumpChat(userId)
+local function looksRussian(text)
+    if type(text) ~= "string" then return false end
+    local lower = string.lower(text)
+    -- UTF-8 byte patterns cover Cyrillic; Russian-specific letters increase confidence.
+    local hasCyrillic = string.find(lower, "[\208-\211][\128-\191]") ~= nil
+    local hasRussianSpecific = string.find(lower, "[ёыэъЁЫЭЪ]") ~= nil
+    local hasUkrainianSpecific = string.find(lower, "[іїєґІЇЄҐ]") ~= nil
+    return hasCyrillic and (hasRussianSpecific or not hasUkrainianSpecific)
+end
+
+local function bumpChat(userId, text)
     if not userId or userId == LocalPlayer.UserId then
         return
     end
     chatMessageCount = chatMessageCount + 1
+    if looksRussian(text) then
+        russianChatCount = russianChatCount + 1
+    end
 end
 
 pcall(function()
     table.insert(chatConns, TextChatService.MessageReceived:Connect(function(msg)
         if msg and msg.TextSource then
-            bumpChat(msg.TextSource.UserId)
+            bumpChat(msg.TextSource.UserId, msg.Text)
         end
     end))
 end)
+
+local scheduleRender
 
 local function trackPlayer(pl)
     if not pl or pl == LocalPlayer then
         return
     end
-    table.insert(chatConns, pl.Chatted:Connect(function()
-        bumpChat(pl.UserId)
+    table.insert(chatConns, pl.Chatted:Connect(function(message)
+        bumpChat(pl.UserId, message)
     end))
+    -- Country lookups yield, so warm the cache concurrently instead of freezing the UI.
+    task.spawn(function()
+        local code = lookupCountry(pl)
+        if code and scheduleRender then
+            scheduleRender()
+        end
+    end)
 end
 
 for _, pl in ipairs(Players:GetPlayers()) do
@@ -923,6 +1051,9 @@ local function buildCard(pl)
         end
     end)
 
+    local cachedCountry = not isLocal and countryCache[pl.UserId] or nil
+    local country = cachedCountry ~= false and cachedCountry or nil
+
     local tags = {}
     if isLocal then
         table.insert(tags, "YOU")
@@ -932,6 +1063,9 @@ local function buildCard(pl)
     end
     if isDonator then
         table.insert(tags, "PREMIUM")
+    end
+    if country then
+        table.insert(tags, country)
     end
 
     local display = pl.DisplayName
@@ -985,7 +1119,7 @@ local function renderPlayers()
     updateStats()
 end
 
-local function scheduleRender()
+scheduleRender = function()
     if renderQueued then
         return
     end
@@ -1247,6 +1381,23 @@ local function countDonators()
     return n
 end
 
+local function getRegionStats(region)
+    if region == "ANY" then return 0, 0, 100 end
+    local matched, known = 0, 0
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer then
+            local cached = countryCache[pl.UserId]
+            local code = cached ~= false and cached or nil
+            if code then
+                known = known + 1
+                if countryMatchesRegion(code, region) then matched = matched + 1 end
+            end
+        end
+    end
+    local percent = known > 0 and math.floor((matched / known) * 100 + 0.5) or 0
+    return matched, known, percent
+end
+
 local function evaluateServer()
     evaluateToken = evaluateToken + 1
     local token = evaluateToken
@@ -1256,6 +1407,7 @@ local function evaluateServer()
     end
 
     chatMessageCount = 0
+    russianChatCount = 0
     local seconds = config.AnalyzeSeconds or 5
     for i = seconds, 1, -1 do
         if not guiAlive or not config.AutoHop or token ~= evaluateToken then
@@ -1281,10 +1433,14 @@ local function evaluateServer()
     local passDonators = (not config.FilterDonators) or (donatorCount >= 1)
     local passChat = (not config.FilterChat) or (chatMessageCount >= 1)
     local passPlayers = playerCount >= (config.MinPlayers or 1)
+    local regionMatched, regionKnown, regionPercent = getRegionStats(config.PeopleRegion)
+    local passRegion = config.PeopleRegion == "ANY"
+        or (regionKnown > 0 and regionMatched > 0 and regionPercent >= (config.MinRegionPercent or 35))
+        or (config.PeopleRegion == "RUSSIAN" and russianChatCount > 0)
 
-    if passDonators and passChat and passPlayers then
+    if passDonators and passChat and passPlayers and passRegion then
         SearchBtn.Text = "[ MATCH FOUND ]"
-        setStatus(string.format("match  prem=%d  chat=%d  players=%d", donatorCount, chatMessageCount, playerCount))
+        setStatus(string.format("match prem=%d chat=%d ru=%d region=%d/%d (%d%%)", donatorCount, chatMessageCount, russianChatCount, regionMatched, regionKnown, regionPercent))
         config.AutoHop = false
         saveSettings(config)
         flashMatch()
@@ -1304,9 +1460,12 @@ local function evaluateServer()
         if not passPlayers then
             table.insert(reasons, "few players")
         end
+        if not passRegion then
+            table.insert(reasons, "wrong region " .. tostring(regionPercent) .. "%")
+        end
         local why = table.concat(reasons, ", ")
         SearchBtn.Text = "[ NEXT SERVER ]"
-        setStatus(string.format("skip (%s)  prem=%d chat=%d pl=%d", why, donatorCount, chatMessageCount, playerCount))
+        setStatus(string.format("skip (%s) prem=%d chat=%d ru=%d pl=%d", why, donatorCount, chatMessageCount, russianChatCount, playerCount))
         task.wait(0.45)
         if config.AutoHop and guiAlive and token == evaluateToken then
             executeHop()
