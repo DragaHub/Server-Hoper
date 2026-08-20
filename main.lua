@@ -17,18 +17,53 @@ local SETTINGS_FILE = "ServerFinderConfig.json"
 local VISITED_FILE = "ServerFinderVisited.json"
 local MAX_VISITED = 200
 local MAX_API_PAGES = 8
-local HTTP_RETRIES = 3
+local HTTP_RETRIES = 4
+local MAX_COUNTRY_LOOKUPS = 4
+local TARGET_CANDIDATES = 60
+local TELEPORT_TIMEOUT = 10
+local GUI_MIN_SCALE = 0.55
+local VERSION = "2.0"
 
 local guiAlive = true
 local isHopping = false
+local hopToken = 0
 local evaluateToken = 0
 local minimized = false
+local pendingServerId = nil
+local sessionStats = {
+    hops = 0,
+    failures = 0,
+}
+local RNG = Random.new()
+
+local globalConns = {}
+local function rememberConnection(conn)
+    table.insert(globalConns, conn)
+    return conn
+end
+
+local function disconnectConnections(list)
+    for _, conn in ipairs(list) do
+        pcall(function()
+            conn:Disconnect()
+        end)
+    end
+    table.clear(list)
+end
+
+local function executorEnvironment()
+    if type(getgenv) ~= "function" then return nil end
+    local ok, env = pcall(getgenv)
+    return ok and type(env) == "table" and env or nil
+end
 
 local function setQueue()
-    local q = queue_on_teleport or (getgenv and getgenv().queue_on_teleport)
-    if not q then
-        return false
-    end
+    local env = executorEnvironment()
+    local q = queue_on_teleport
+        or (type(syn) == "table" and syn.queue_on_teleport)
+        or (type(fluxus) == "table" and fluxus.queue_on_teleport)
+        or (env and env.queue_on_teleport)
+    if type(q) ~= "function" then return false end
     local ok = pcall(function()
         q(string.format([[
             repeat task.wait() until game:IsLoaded()
@@ -43,52 +78,46 @@ local function setQueue()
 end
 
 local function getHttpRequest()
+    local env = executorEnvironment()
     return request
         or http_request
-        or (syn and syn.request)
-        or (http and http.request)
-        or (fluxus and fluxus.request)
-        or (getgenv and (getgenv().request or getgenv().http_request))
+        or (type(syn) == "table" and syn.request)
+        or (type(http) == "table" and http.request)
+        or (type(fluxus) == "table" and fluxus.request)
+        or (env and (env.request or env.http_request))
 end
 
--- Черный список посещенных серверов (LRU по времени, старый формат {id=true} тоже читается)
-local function loadVisited()
-    if isfile and isfile(VISITED_FILE) then
-        local success, result = pcall(function()
-            return HttpService:JSONDecode(readfile(VISITED_FILE))
-        end)
-        if success and type(result) == "table" then
-            return result
-        end
-    end
-    return {}
+local function canReadFile(path)
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return false end
+    local ok, exists = pcall(isfile, path)
+    return ok and exists == true
 end
 
-local function saveVisited(data)
-    if writefile then
-        pcall(function()
-            writefile(VISITED_FILE, HttpService:JSONEncode(data))
-        end)
-    end
-end
-
+-- LRU history. The legacy { [jobId] = true } format is migrated safely.
 local function visitedTimestamp(value)
-    if type(value) == "number" then
+    if type(value) == "number" and value == value and value >= 0 then
         return value
     end
     return 0
 end
 
 local function pruneVisited(data, keep)
-    keep = keep or MAX_VISITED
+    keep = math.max(1, math.floor(tonumber(keep) or MAX_VISITED))
     local entries = {}
     for id, value in pairs(data) do
-        table.insert(entries, { id = id, ts = visitedTimestamp(value) })
+        if type(id) == "string" and #id > 0 and #id <= 100 then
+            table.insert(entries, { id = id, ts = visitedTimestamp(value) })
+        else
+            data[id] = nil
+        end
     end
     if #entries <= keep then
         return data
     end
     table.sort(entries, function(a, b)
+        if a.ts == b.ts then
+            return a.id < b.id
+        end
         return a.ts < b.ts
     end)
     local overflow = #entries - keep
@@ -98,14 +127,46 @@ local function pruneVisited(data, keep)
     return data
 end
 
+local function loadVisited()
+    if canReadFile(VISITED_FILE) then
+        local success, result = pcall(function()
+            return HttpService:JSONDecode(readfile(VISITED_FILE))
+        end)
+        if success and type(result) == "table" then
+            local clean = {}
+            for id, value in pairs(result) do
+                if type(id) == "string" and #id > 0 and #id <= 100
+                    and (type(value) == "number" or value == true)
+                then
+                    clean[id] = visitedTimestamp(value)
+                end
+            end
+            return pruneVisited(clean)
+        end
+    end
+    return {}
+end
+
+local function saveVisited(data)
+    if type(writefile) == "function" then
+        pcall(function()
+            writefile(VISITED_FILE, HttpService:JSONEncode(data))
+        end)
+    end
+end
+
 local visitedServers = loadVisited()
-visitedServers[game.JobId] = os.time()
+if type(game.JobId) == "string" and game.JobId ~= "" then
+    visitedServers[game.JobId] = os.time()
+end
 visitedServers = pruneVisited(visitedServers)
 saveVisited(visitedServers)
 
 local function forgetOldestVisited(keep)
     visitedServers = pruneVisited(visitedServers, keep)
-    visitedServers[game.JobId] = os.time()
+    if type(game.JobId) == "string" and game.JobId ~= "" then
+        visitedServers[game.JobId] = os.time()
+    end
     saveVisited(visitedServers)
 end
 
@@ -117,62 +178,106 @@ local function countVisited()
     return n
 end
 
--- Настройки: новые ключи подмешиваются к старому файлу
+-- Settings are whitelisted and normalized so a damaged JSON file cannot break the UI.
 local defaultSettings = {
     AutoHop = false,
     FilterDonators = true,
     FilterChat = false,
     MinPlayers = 3,
+    MinFreeSlots = 2,
     AnalyzeSeconds = 5,
-    PreferFull = true,
+    SelectionMode = "SMART",
+    MaxPing = 0,
     PeopleRegion = "ANY",
     MinRegionPercent = 35,
+    Animations = true,
 }
 
-local function loadSettings()
-    local cfg = {}
-    for k, v in pairs(defaultSettings) do
-        cfg[k] = v
+local VALID_REGIONS = {
+    ANY = true, RUSSIAN = true, CIS = true, EUROPE = true,
+    ["N.AMERICA"] = true, ["S.AMERICA"] = true, ASIA = true, OCEANIA = true,
+}
+local VALID_SELECTION_MODES = {
+    SMART = true,
+    FULL = true,
+    ["LOW PING"] = true,
+    RANDOM = true,
+}
+
+local function copyDefaults()
+    local result = {}
+    for key, value in pairs(defaultSettings) do
+        result[key] = value
     end
-    if isfile and isfile(SETTINGS_FILE) then
+    return result
+end
+
+local function finiteNumber(value, fallback)
+    if type(value) ~= "number" then return fallback end
+    if value ~= value or value == math.huge or value == -math.huge then return fallback end
+    return value
+end
+
+local function normalizeSettings(cfg)
+    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations" }) do
+        if type(cfg[key]) ~= "boolean" then
+            cfg[key] = defaultSettings[key]
+        end
+    end
+    cfg.MinPlayers = math.clamp(math.floor(finiteNumber(cfg.MinPlayers, defaultSettings.MinPlayers)), 1, 100)
+    cfg.MinFreeSlots = math.clamp(math.floor(finiteNumber(cfg.MinFreeSlots, defaultSettings.MinFreeSlots)), 1, 20)
+    cfg.AnalyzeSeconds = math.clamp(math.floor(finiteNumber(cfg.AnalyzeSeconds, defaultSettings.AnalyzeSeconds)), 2, 20)
+    cfg.MaxPing = math.clamp(math.floor(finiteNumber(cfg.MaxPing, defaultSettings.MaxPing)), 0, 500)
+    cfg.MinRegionPercent = math.clamp(math.floor(finiteNumber(cfg.MinRegionPercent, defaultSettings.MinRegionPercent)), 10, 100)
+    if type(cfg.PeopleRegion) ~= "string" or not VALID_REGIONS[cfg.PeopleRegion] then
+        cfg.PeopleRegion = defaultSettings.PeopleRegion
+    end
+    if type(cfg.SelectionMode) ~= "string" or not VALID_SELECTION_MODES[cfg.SelectionMode] then
+        cfg.SelectionMode = defaultSettings.SelectionMode
+    end
+    return cfg
+end
+
+local function loadSettings()
+    local cfg = copyDefaults()
+    if canReadFile(SETTINGS_FILE) then
         local success, result = pcall(function()
             return HttpService:JSONDecode(readfile(SETTINGS_FILE))
         end)
         if success and type(result) == "table" then
-            for k, v in pairs(result) do
-                if defaultSettings[k] ~= nil then
-                    cfg[k] = v
+            for key in pairs(defaultSettings) do
+                if result[key] ~= nil then
+                    cfg[key] = result[key]
                 end
+            end
+            -- Seamless migration from the old PreferFull toggle.
+            if result.SelectionMode == nil and type(result.PreferFull) == "boolean" then
+                cfg.SelectionMode = result.PreferFull and "FULL" or "RANDOM"
             end
         end
     end
-    if type(cfg.MinPlayers) ~= "number" then
-        cfg.MinPlayers = defaultSettings.MinPlayers
-    end
-    cfg.MinPlayers = math.clamp(math.floor(cfg.MinPlayers), 1, 40)
-    if type(cfg.AnalyzeSeconds) ~= "number" then
-        cfg.AnalyzeSeconds = defaultSettings.AnalyzeSeconds
-    end
-    cfg.AnalyzeSeconds = math.clamp(math.floor(cfg.AnalyzeSeconds), 2, 15)
-    local validRegions = {
-        ANY = true, RUSSIAN = true, CIS = true, EUROPE = true,
-        ["N.AMERICA"] = true, ["S.AMERICA"] = true, ASIA = true, OCEANIA = true,
-    }
-    if type(cfg.PeopleRegion) ~= "string" or not validRegions[cfg.PeopleRegion] then
-        cfg.PeopleRegion = defaultSettings.PeopleRegion
-    end
-    if type(cfg.MinRegionPercent) ~= "number" then
-        cfg.MinRegionPercent = defaultSettings.MinRegionPercent
-    end
-    cfg.MinRegionPercent = math.clamp(math.floor(cfg.MinRegionPercent), 10, 100)
-    return cfg
+    return normalizeSettings(cfg)
 end
 
-local function saveSettings(cfg)
-    if writefile then
-        pcall(function()
-            writefile(SETTINGS_FILE, HttpService:JSONEncode(cfg))
-        end)
+local settingsSaveToken = 0
+local function saveSettings(cfg, immediate)
+    if type(writefile) ~= "function" then return end
+    local snapshot = {}
+    for key in pairs(defaultSettings) do snapshot[key] = cfg[key] end
+    normalizeSettings(snapshot)
+    local encoded, payload = pcall(function() return HttpService:JSONEncode(snapshot) end)
+    if not encoded then return end
+
+    settingsSaveToken = settingsSaveToken + 1
+    local token = settingsSaveToken
+    local function writeNow()
+        if token ~= settingsSaveToken then return end
+        pcall(writefile, SETTINGS_FILE, payload)
+    end
+    if immediate then
+        writeNow()
+    else
+        task.delay(0.2, writeNow)
     end
 end
 
@@ -197,6 +302,7 @@ local REGION_COUNTRIES = {
 
 local countryCache = {}
 local countryLookupInFlight = {}
+local activeCountryLookups = 0
 
 local function countryMatchesRegion(code, region)
     if region == "ANY" then return true end
@@ -206,35 +312,53 @@ end
 
 local function lookupCountry(pl)
     if not pl or pl == LocalPlayer then return nil end
-    local cached = countryCache[pl.UserId]
+    local userId = pl.UserId
+    local cached = countryCache[userId]
     if cached ~= nil then return cached ~= false and cached or nil end
-    if countryLookupInFlight[pl.UserId] then return nil end
-    countryLookupInFlight[pl.UserId] = true
-    local ok, code = pcall(function()
-        return LocalizationService:GetCountryRegionForPlayerAsync(pl)
-    end)
-    countryLookupInFlight[pl.UserId] = nil
-    if ok and type(code) == "string" and #code == 2 then
-        countryCache[pl.UserId] = string.upper(code)
-        return countryCache[pl.UserId]
+    if countryLookupInFlight[userId] then return nil end
+    countryLookupInFlight[userId] = true
+
+    while guiAlive and pl.Parent and activeCountryLookups >= MAX_COUNTRY_LOOKUPS do
+        task.wait(0.08)
     end
-    countryCache[pl.UserId] = false
+    if not guiAlive or not pl.Parent then
+        countryLookupInFlight[userId] = nil
+        return nil
+    end
+
+    activeCountryLookups = activeCountryLookups + 1
+    local ok, code = false, nil
+    for attempt = 1, 2 do
+        ok, code = pcall(function()
+            return LocalizationService:GetCountryRegionForPlayerAsync(pl)
+        end)
+        if ok and type(code) == "string" and #code == 2 then break end
+        if not guiAlive or not pl.Parent then break end
+        if attempt < 2 then task.wait(0.25) end
+    end
+    activeCountryLookups = math.max(0, activeCountryLookups - 1)
+    countryLookupInFlight[userId] = nil
+    if ok and type(code) == "string" and #code == 2 then
+        countryCache[userId] = string.upper(code)
+        return countryCache[userId]
+    end
+    -- Cache failures for this server to avoid repeatedly hitting a yielding API.
+    countryCache[userId] = false
     return nil
 end
 
-if CoreGui:FindFirstChild("ClassicServerFinder") then
-    CoreGui.ClassicServerFinder:Destroy()
-end
+local oldCoreGui = CoreGui:FindFirstChild("ClassicServerFinder")
+if oldCoreGui then pcall(function() oldCoreGui:Destroy() end) end
 local existingPlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
-if existingPlayerGui and existingPlayerGui:FindFirstChild("ClassicServerFinder") then
-    existingPlayerGui.ClassicServerFinder:Destroy()
-end
+local oldPlayerGui = existingPlayerGui and existingPlayerGui:FindFirstChild("ClassicServerFinder")
+if oldPlayerGui then pcall(function() oldPlayerGui:Destroy() end) end
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "ClassicServerFinder"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999
 
 pcall(function()
     ScreenGui.Parent = CoreGui
@@ -244,73 +368,98 @@ if not ScreenGui.Parent then
 end
 
 local chatConns = {}
+local playerConns = {}
 
-local function disconnectChat()
-    for _, conn in ipairs(chatConns) do
-        pcall(function()
-            conn:Disconnect()
-        end)
+local function disconnectPlayer(userId)
+    local list = playerConns[userId]
+    if list then
+        disconnectConnections(list)
+        playerConns[userId] = nil
     end
-    chatConns = {}
 end
 
 ScreenGui.Destroying:Connect(function()
     guiAlive = false
     config.AutoHop = false
-    disconnectChat()
+    hopToken = hopToken + 1
+    evaluateToken = evaluateToken + 1
+    disconnectConnections(chatConns)
+    for _, list in pairs(playerConns) do
+        disconnectConnections(list)
+    end
+    table.clear(playerConns)
+    disconnectConnections(globalConns)
 end)
 
 local WHITE = Color3.fromRGB(255, 255, 255)
 local BLACK = Color3.fromRGB(0, 0, 0)
 local DIM = Color3.fromRGB(180, 180, 180)
 local MUTED = Color3.fromRGB(120, 120, 120)
+local GREEN = Color3.fromRGB(140, 255, 170)
+local RED = Color3.fromRGB(255, 135, 135)
+
+local activeTweens = setmetatable({}, { __mode = "k" })
+local function tween(instance, info, props)
+    if not instance or not instance.Parent then
+        return nil
+    end
+    local keys = {}
+    for key in pairs(props) do
+        table.insert(keys, key)
+    end
+    table.sort(keys)
+    local channel = table.concat(keys, "+")
+    local channels = activeTweens[instance]
+    if not channels then
+        channels = {}
+        activeTweens[instance] = channels
+    end
+    local previous = channels[channel]
+    if previous then
+        pcall(function() previous:Cancel() end)
+    end
+    if not config.Animations then
+        for key, value in pairs(props) do
+            instance[key] = value
+        end
+        channels[channel] = nil
+        return nil
+    end
+    local animation = TweenService:Create(instance, info, props)
+    channels[channel] = animation
+    animation:Play()
+    return animation
+end
 
 local function setupRetroButton(button)
-    local origSize = button.Size
     local isImage = button:IsA("ImageButton")
+    local scale = Instance.new("UIScale")
+    scale.Scale = 1
+    scale.Parent = button
 
-    button.MouseEnter:Connect(function()
+    local function setHover(hovered)
         if not guiAlive or not button.Parent then
             return
         end
-        local props = { BackgroundColor3 = WHITE }
+        local props = { BackgroundColor3 = hovered and WHITE or BLACK }
         if isImage then
-            props.ImageColor3 = BLACK
+            props.ImageColor3 = hovered and BLACK or WHITE
         else
-            props.TextColor3 = BLACK
+            props.TextColor3 = hovered and BLACK or WHITE
         end
-        TweenService:Create(button, TweenInfo.new(0.12), props):Play()
-    end)
+        tween(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), props)
+    end
 
+    button.MouseEnter:Connect(function() setHover(true) end)
     button.MouseLeave:Connect(function()
-        if not guiAlive or not button.Parent then
-            return
-        end
-        local props = { BackgroundColor3 = BLACK }
-        if isImage then
-            props.ImageColor3 = WHITE
-        else
-            props.TextColor3 = WHITE
-        end
-        TweenService:Create(button, TweenInfo.new(0.12), props):Play()
+        setHover(false)
+        tween(scale, TweenInfo.new(0.08, Enum.EasingStyle.Back), { Scale = 1 })
     end)
-
     button.MouseButton1Down:Connect(function()
-        if not guiAlive or not button.Parent then
-            return
-        end
-        TweenService:Create(button, TweenInfo.new(0.05), {
-            Size = UDim2.new(origSize.X.Scale, origSize.X.Offset - 4, origSize.Y.Scale, origSize.Y.Offset - 2),
-        }):Play()
+        tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.94 })
     end)
-
     button.MouseButton1Up:Connect(function()
-        if not guiAlive or not button.Parent then
-            return
-        end
-        TweenService:Create(button, TweenInfo.new(0.08, Enum.EasingStyle.Back), {
-            Size = origSize,
-        }):Play()
+        tween(scale, TweenInfo.new(0.1, Enum.EasingStyle.Back), { Scale = 1 })
     end)
 end
 
@@ -324,30 +473,68 @@ local function raiseWindow(frame)
     frame.ZIndex = windowZ
 end
 
+local function viewportSize()
+    local camera = workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1280, 720)
+end
+
+local function clampToViewport(frame)
+    if not frame or not frame.Parent then
+        return
+    end
+    local viewport = viewportSize()
+    local absolutePosition = frame.AbsolutePosition
+    local absoluteSize = frame.AbsoluteSize
+    local margin = 6
+    local maxX = math.max(margin, viewport.X - absoluteSize.X - margin)
+    local maxY = math.max(margin, viewport.Y - absoluteSize.Y - margin)
+    local targetX = math.clamp(absolutePosition.X, margin, maxX)
+    local targetY = math.clamp(absolutePosition.Y, margin, maxY)
+    local delta = Vector2.new(targetX - absolutePosition.X, targetY - absolutePosition.Y)
+    if delta.Magnitude > 0.5 then
+        frame.Position = UDim2.new(
+            frame.Position.X.Scale,
+            frame.Position.X.Offset + delta.X,
+            frame.Position.Y.Scale,
+            frame.Position.Y.Offset + delta.Y
+        )
+    end
+end
+
 local function makeDraggable(frame, handle)
     local dragging = false
     local dragStart = nil
     local startPos = nil
+    local dragInput = nil
 
     handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            raiseWindow(frame)
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if not dragging or not guiAlive then
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch
+        then
             return
         end
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragInput = input
+        dragStart = input.Position
+        startPos = frame.Position
+        raiseWindow(frame)
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                dragInput = nil
+                clampToViewport(frame)
+            end
+        end)
+    end)
+
+    rememberConnection(UserInputService.InputChanged:Connect(function(input)
+        if not dragging or not guiAlive or not dragInput then
+            return
+        end
+        local validMouse = dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement
+        local validTouch = dragInput.UserInputType == Enum.UserInputType.Touch and input == dragInput
+        if validMouse or validTouch then
             local delta = input.Position - dragStart
             frame.Position = UDim2.new(
                 startPos.X.Scale,
@@ -356,21 +543,23 @@ local function makeDraggable(frame, handle)
                 startPos.Y.Offset + delta.Y
             )
         end
-    end)
+    end))
 end
 
 local function pulseBorder(frame)
     task.spawn(function()
         while guiAlive and frame.Parent do
-            if frame.Visible then
-                TweenService:Create(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED }):Play()
+            if frame.Visible and config.Animations then
+                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED })
             end
             task.wait(1.2)
             if not (guiAlive and frame.Parent) then
                 break
             end
-            if frame.Visible then
-                TweenService:Create(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = WHITE }):Play()
+            if frame.Visible and config.Animations then
+                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = WHITE })
+            elseif frame.Visible then
+                frame.BorderColor3 = WHITE
             end
             task.wait(1.2)
         end
@@ -390,6 +579,11 @@ local function createWindow(opts)
     win.ClipsDescendants = true
     win.ZIndex = 2
     win.Parent = ScreenGui
+
+    local windowScaleTarget = 1
+    local windowScale = Instance.new("UIScale")
+    windowScale.Scale = windowScaleTarget
+    windowScale.Parent = win
 
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
@@ -443,29 +637,59 @@ local function createWindow(opts)
         raiseWindow(win)
     end)
 
-    close.MouseButton1Click:Connect(function()
-        win.Visible = false
-    end)
+    local visibilityToken = 0
+    local function hide()
+        visibilityToken = visibilityToken + 1
+        local token = visibilityToken
+        if not config.Animations then
+            win.Visible = false
+            return
+        end
+        tween(windowScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = windowScaleTarget * 0.94 })
+        tween(win, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 })
+        task.delay(0.12, function()
+            if win.Parent and visibilityToken == token then
+                win.Visible = false
+            end
+        end)
+    end
+
+    close.MouseButton1Click:Connect(hide)
 
     local function show()
+        visibilityToken = visibilityToken + 1
         win.Visible = true
         raiseWindow(win)
-        win.BackgroundTransparency = 1
-        TweenService:Create(win, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        clampToViewport(win)
+        if config.Animations then
+            win.BackgroundTransparency = 1
+            windowScale.Scale = windowScaleTarget * 0.92
+        end
+        tween(win, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
             BackgroundTransparency = 0,
-        }):Play()
+        })
+        tween(windowScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Scale = windowScaleTarget,
+        })
     end
 
     return {
         Frame = win,
         Body = body,
-        show = show,
-        hide = function()
-            win.Visible = false
+        Scale = windowScale,
+        setScale = function(value)
+            windowScaleTarget = value
+            if win.Visible then
+                tween(windowScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = value })
+            else
+                windowScale.Scale = value
+            end
         end,
+        show = show,
+        hide = hide,
         toggle = function()
             if win.Visible then
-                win.Visible = false
+                hide()
             else
                 show()
             end
@@ -487,11 +711,19 @@ Main.Active = true
 Main.ClipsDescendants = true
 Main.Parent = ScreenGui
 
-Main.BackgroundTransparency = 1
+local responsiveMainScale = math.clamp(math.min((viewportSize().X - 12) / 340, (viewportSize().Y - 12) / 540), GUI_MIN_SCALE, 1)
+local MainScale = Instance.new("UIScale")
+MainScale.Scale = config.Animations and responsiveMainScale * 0.94 or responsiveMainScale
+MainScale.Parent = Main
+
+Main.BackgroundTransparency = config.Animations and 1 or 0
 Main.ZIndex = 1
-TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+tween(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
     BackgroundTransparency = 0,
-}):Play()
+})
+tween(MainScale, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+    Scale = responsiveMainScale,
+})
 pulseBorder(Main)
 
 local TitleBar = Instance.new("Frame")
@@ -500,11 +732,12 @@ TitleBar.Size = UDim2.new(1, 0, 0, 30)
 TitleBar.BackgroundTransparency = 1
 TitleBar.Parent = Main
 makeDraggable(Main, TitleBar)
+Main.InputBegan:Connect(function() raiseWindow(Main) end)
 
 local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(1, -118, 1, 0)
 Title.Position = UDim2.new(0, 8, 0, 0)
-Title.Text = "[ SERVER FINDER ]"
+Title.Text = "[ SERVER FINDER v" .. VERSION .. " ]"
 Title.TextColor3 = WHITE
 Title.Font = Enum.Font.Code
 Title.TextSize = 12
@@ -552,7 +785,7 @@ local CloseBtn = makeHeaderButton("X", -25)
 
 CloseBtn.MouseButton1Click:Connect(function()
     config.AutoHop = false
-    saveSettings(config)
+    saveSettings(config, true)
     guiAlive = false
     ScreenGui:Destroy()
 end)
@@ -568,10 +801,11 @@ MinBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     Body.Visible = not minimized
     if minimized then
-        TweenService:Create(Main, TweenInfo.new(0.15), { Size = MINIMIZED_SIZE }):Play()
+        tween(Main, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = MINIMIZED_SIZE })
         MinBtn.Text = "+"
     else
-        TweenService:Create(Main, TweenInfo.new(0.15), { Size = EXPANDED_SIZE }):Play()
+        Body.Visible = true
+        tween(Main, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = EXPANDED_SIZE })
         MinBtn.Text = "_"
     end
 end)
@@ -582,6 +816,13 @@ Line1.Position = UDim2.new(0, 0, 0, 0)
 Line1.BackgroundColor3 = WHITE
 Line1.BorderSizePixel = 0
 Line1.Parent = Body
+
+local settingRefreshers = {}
+local function refreshSettingControls()
+    for _, refresh in ipairs(settingRefreshers) do
+        refresh()
+    end
+end
 
 local function createToggle(parent, text, pos, size, key)
     local btn = Instance.new("TextButton")
@@ -598,8 +839,11 @@ local function createToggle(parent, text, pos, size, key)
     setupRetroButton(btn)
 
     local function updateText()
-        btn.Text = (config[key] and "[X] " or "[ ] ") .. text
+        if btn.Parent then
+            btn.Text = (config[key] and "[X] " or "[ ] ") .. text
+        end
     end
+    table.insert(settingRefreshers, updateText)
     updateText()
 
     btn.MouseButton1Click:Connect(function()
@@ -630,8 +874,11 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
     caption.Parent = frame
 
     local function refresh()
-        caption.Text = label .. " " .. tostring(config[key]) .. (suffix or "")
+        if caption.Parent then
+            caption.Text = label .. " " .. tostring(config[key]) .. (suffix or "")
+        end
     end
+    table.insert(settingRefreshers, refresh)
     refresh()
 
     local function makeStep(symbol, dx, delta)
@@ -676,8 +923,11 @@ local function createSelector(parent, label, pos, size, key, values, labels)
     setupRetroButton(btn)
 
     local function refresh()
-        btn.Text = label .. ": <  " .. (labels[config[key]] or config[key]) .. "  >"
+        if btn.Parent then
+            btn.Text = label .. ": <  " .. (labels[config[key]] or config[key]) .. "  >"
+        end
     end
+    table.insert(settingRefreshers, refresh)
     refresh()
 
     btn.MouseButton1Click:Connect(function()
@@ -702,6 +952,11 @@ local function hint(parent, text, pos)
     label.Parent = parent
     return label
 end
+
+local setStatus
+local updateStats
+local updateBtnText
+local notify
 
 local InfoWin = createWindow({
     Name = "InfoWindow",
@@ -734,89 +989,158 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SCRIPT FUNCTIONALITY
+> SERVER FINDER v2.0
 
-1. AUTO-HOP LOOP
-   queue_on_teleport re-runs the script after each hop.
+1. SMART AUTO-HOP
+   Scans multiple API pages, scores candidates and
+   re-runs after teleport when the executor supports
+   queue_on_teleport.
 
-2. DONATORS FILTER
-   Requires at least one Roblox Premium player
-   (other than you) on the current server.
+2. SEARCH MODES
+   SMART balances occupancy, ping and FPS. FULL,
+   LOW PING and RANDOM strategies are also available.
 
-3. ACTIVE CHAT FILTER
-   Counts live chat from other players during
-   the analyze window after join.
+3. SAFE TELEPORTS
+   Stale timeout callbacks are cancelled. Failed
+   targets are rolled back from history and retried
+   only while auto-loop is enabled.
 
-4. MIN PLAYERS
-   Skip empty / dead servers below the threshold.
+4. FILTERS
+   Premium, active chat, minimum players, free slots,
+   optional max ping and audience region.
 
-5. PREFER FULL
-   When picking the next server, bias toward
-   fuller rooms instead of a fully random pick.
+5. PEOPLE REGION
+   Roblox does not expose a physical datacenter in
+   the public server API. Region therefore describes
+   the detected audience after joining. Unknown
+   countries do not count as a mismatch.
 
-6. ANTI-REPEAT
-   Remembers up to 200 JobIds in
-   ServerFinderVisited.json (oldest dropped).
-   Failed lookups no longer wipe the list.
+6. RUSSIAN DETECTION
+   Uses UTF-8 code points rather than byte patterns,
+   so Cyrillic and Ukrainian-specific letters are not
+   accidentally misclassified.
 
-7. API PAGINATION
-   Walks several pages of the public servers
-   API, retries 429/errors, encodes cursors.
+7. ANTI-REPEAT
+   Keeps a validated 200-server LRU history. Use
+   CLEAR HISTORY in Settings when you want a reset.
 
-8. PEOPLE REGION
-   After joining, checks available Roblox country
-   codes and observed chat language. RUSSIAN also
-   recognizes Cyrillic chat. Unknown countries are
-   ignored instead of counted as a mismatch.
+8. PERFORMANCE
+   Player cards update in place; avatars/friendship
+   are cached, country requests are concurrency-limited,
+   chat events are deduplicated and file saves debounced.
 
-9. SERVER REGION LIMITATION
-   Roblox's public server API does not expose the
-   physical datacenter. The selected region means
-   the server audience (people), not a fake host
-   location. Filtering happens after each join.
+9. GUI
+   Animated windows, progress bar, notifications,
+   responsive scaling and viewport-safe dragging.
+   Press RightShift to hide/show the entire interface.
 
 10. HOP ONCE
-   Jump to another server without enabling
-   the auto-loop.
+   Jumps without changing the saved auto-loop setting.
 
-Use [?] and the gear to open Info / Settings
-as separate windows.
-
-Developed for personal use / ScriptBlox.]]
+Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
 
 local SettingsWin = createWindow({
     Name = "SettingsWindow",
     Title = "[ SETTINGS ]",
-    Size = UDim2.new(0, 300, 0, 398),
-    Position = UDim2.new(0.5, -486, 0.5, -199),
+    Size = UDim2.new(0, 310, 0, 460),
+    Position = UDim2.new(0.5, -500, 0.5, -230),
 })
 
-createToggle(SettingsWin.Body, "DONATORS", UDim2.new(0, 8, 0, 10), UDim2.new(1, -16, 0, 26), "FilterDonators")
-hint(SettingsWin.Body, "need at least 1 premium player", UDim2.new(0, 8, 0, 38))
+local SettingsScroll = Instance.new("ScrollingFrame")
+SettingsScroll.Size = UDim2.new(1, -12, 1, -12)
+SettingsScroll.Position = UDim2.new(0, 6, 0, 6)
+SettingsScroll.BackgroundTransparency = 1
+SettingsScroll.BorderSizePixel = 0
+SettingsScroll.ScrollBarThickness = 3
+SettingsScroll.ScrollBarImageColor3 = WHITE
+SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 558)
+SettingsScroll.Parent = SettingsWin.Body
 
-createToggle(SettingsWin.Body, "ACTIVE CHAT", UDim2.new(0, 8, 0, 58), UDim2.new(1, -16, 0, 26), "FilterChat")
-hint(SettingsWin.Body, "need chat from other players", UDim2.new(0, 8, 0, 86))
+createToggle(SettingsScroll, "DONATORS", UDim2.new(0, 6, 0, 6), UDim2.new(1, -16, 0, 26), "FilterDonators")
+hint(SettingsScroll, "need at least 1 premium player", UDim2.new(0, 6, 0, 34))
 
-createToggle(SettingsWin.Body, "PREFER FULL", UDim2.new(0, 8, 0, 106), UDim2.new(1, -16, 0, 26), "PreferFull")
-hint(SettingsWin.Body, "pick fuller rooms when hopping", UDim2.new(0, 8, 0, 134))
+createToggle(SettingsScroll, "ACTIVE CHAT", UDim2.new(0, 6, 0, 54), UDim2.new(1, -16, 0, 26), "FilterChat")
+hint(SettingsScroll, "need a unique message from another player", UDim2.new(0, 6, 0, 82))
 
-createStepper(SettingsWin.Body, "MIN PLAYERS", UDim2.new(0, 8, 0, 156), UDim2.new(1, -16, 0, 26), "MinPlayers", 1, 40, "")
-hint(SettingsWin.Body, "skip quieter servers below this", UDim2.new(0, 8, 0, 184))
+local SEARCH_MODES = { "SMART", "FULL", "LOW PING", "RANDOM" }
+local SEARCH_MODE_LABELS = { SMART = "SMART", FULL = "FULL", ["LOW PING"] = "LOW PING", RANDOM = "RANDOM" }
+createSelector(SettingsScroll, "SEARCH MODE", UDim2.new(0, 6, 0, 102), UDim2.new(1, -16, 0, 26), "SelectionMode", SEARCH_MODES, SEARCH_MODE_LABELS)
+hint(SettingsScroll, "smart balances population, ping and server FPS", UDim2.new(0, 6, 0, 130))
 
-createStepper(SettingsWin.Body, "ANALYZE", UDim2.new(0, 8, 0, 204), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 15, "s")
-hint(SettingsWin.Body, "seconds to listen after join", UDim2.new(0, 8, 0, 232))
+createStepper(SettingsScroll, "MAX PING", UDim2.new(0, 6, 0, 150), UDim2.new(1, -16, 0, 26), "MaxPing", 0, 500, "ms", 25)
+hint(SettingsScroll, "0 disables ping filtering; missing API ping is allowed", UDim2.new(0, 6, 0, 178))
 
-createSelector(SettingsWin.Body, "PEOPLE REGION", UDim2.new(0, 8, 0, 254), UDim2.new(1, -16, 0, 26), "PeopleRegion", REGION_ORDER, REGION_LABELS)
-hint(SettingsWin.Body, "server audience; click to choose", UDim2.new(0, 8, 0, 282))
+createStepper(SettingsScroll, "MIN PLAYERS", UDim2.new(0, 6, 0, 198), UDim2.new(1, -16, 0, 26), "MinPlayers", 1, 100, "")
+hint(SettingsScroll, "skip quiet servers below this population", UDim2.new(0, 6, 0, 226))
 
-createStepper(SettingsWin.Body, "REGION SHARE", UDim2.new(0, 8, 0, 304), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
-hint(SettingsWin.Body, "minimum share among detected players", UDim2.new(0, 8, 0, 332))
+createStepper(SettingsScroll, "FREE SLOTS", UDim2.new(0, 6, 0, 246), UDim2.new(1, -16, 0, 26), "MinFreeSlots", 1, 20, "")
+hint(SettingsScroll, "reduces races with servers that become full", UDim2.new(0, 6, 0, 274))
+
+createStepper(SettingsScroll, "ANALYZE", UDim2.new(0, 6, 0, 294), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 20, "s")
+hint(SettingsScroll, "seconds to listen and inspect after joining", UDim2.new(0, 6, 0, 322))
+
+createSelector(SettingsScroll, "PEOPLE REGION", UDim2.new(0, 6, 0, 342), UDim2.new(1, -16, 0, 26), "PeopleRegion", REGION_ORDER, REGION_LABELS)
+hint(SettingsScroll, "audience region, not the physical datacenter", UDim2.new(0, 6, 0, 370))
+
+createStepper(SettingsScroll, "REGION SHARE", UDim2.new(0, 6, 0, 390), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
+hint(SettingsScroll, "minimum share among players with known country", UDim2.new(0, 6, 0, 418))
+
+createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 438), UDim2.new(1, -16, 0, 26), "Animations")
+hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 466))
+
+local ClearHistoryBtn = Instance.new("TextButton")
+ClearHistoryBtn.Size = UDim2.new(0.5, -10, 0, 30)
+ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 494)
+ClearHistoryBtn.BackgroundColor3 = BLACK
+ClearHistoryBtn.BorderSizePixel = 1
+ClearHistoryBtn.BorderColor3 = WHITE
+ClearHistoryBtn.Font = Enum.Font.Code
+ClearHistoryBtn.TextSize = 10
+ClearHistoryBtn.TextColor3 = WHITE
+ClearHistoryBtn.Text = "[ CLEAR HISTORY ]"
+ClearHistoryBtn.AutoButtonColor = false
+ClearHistoryBtn.Parent = SettingsScroll
+setupRetroButton(ClearHistoryBtn)
+
+local ResetSettingsBtn = Instance.new("TextButton")
+ResetSettingsBtn.Size = UDim2.new(0.5, -10, 0, 30)
+ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 494)
+ResetSettingsBtn.BackgroundColor3 = BLACK
+ResetSettingsBtn.BorderSizePixel = 1
+ResetSettingsBtn.BorderColor3 = WHITE
+ResetSettingsBtn.Font = Enum.Font.Code
+ResetSettingsBtn.TextSize = 10
+ResetSettingsBtn.TextColor3 = WHITE
+ResetSettingsBtn.Text = "[ RESET ]"
+ResetSettingsBtn.AutoButtonColor = false
+ResetSettingsBtn.Parent = SettingsScroll
+setupRetroButton(ResetSettingsBtn)
+
+ClearHistoryBtn.MouseButton1Click:Connect(function()
+    table.clear(visitedServers)
+    if type(game.JobId) == "string" and game.JobId ~= "" then
+        visitedServers[game.JobId] = os.time()
+    end
+    saveVisited(visitedServers)
+    if updateStats then updateStats() end
+    if notify then notify("Visited history cleared", GREEN) end
+end)
+
+ResetSettingsBtn.MouseButton1Click:Connect(function()
+    local keepAutoHop = config.AutoHop
+    config = copyDefaults()
+    config.AutoHop = keepAutoHop
+    saveSettings(config, true)
+    refreshSettingControls()
+    if updateBtnText then updateBtnText() end
+    if notify then notify("Settings restored", GREEN) end
+end)
 
 local function placeBeside(win, xOffset)
     local mainPos = Main.AbsolutePosition
-    local parentAbs = ScreenGui.AbsolutePosition
-    win.Frame.Position = UDim2.new(0, (mainPos.X - parentAbs.X) + xOffset, 0, mainPos.Y - parentAbs.Y)
+    -- ScreenGui is a LayerCollector, not a GuiObject; its origin is (0, 0).
+    win.Frame.Position = UDim2.fromOffset(mainPos.X + xOffset, mainPos.Y)
 end
 
 local function windowWidth(win, fallback)
@@ -838,7 +1162,7 @@ end)
 
 SettingsBtn.MouseButton1Click:Connect(function()
     if not SettingsWin.Frame.Visible then
-        placeBeside(SettingsWin, -(windowWidth(SettingsWin, 300) + 12))
+        placeBeside(SettingsWin, -(windowWidth(SettingsWin, 310) + 12))
         SettingsWin.show()
     else
         SettingsWin.hide()
@@ -879,6 +1203,36 @@ UIPad.PaddingTop = UDim.new(0, 2)
 UIPad.PaddingBottom = UDim.new(0, 2)
 UIPad.Parent = Scroll
 
+local ProgressTrack = Instance.new("Frame")
+ProgressTrack.Size = UDim2.new(1, -16, 0, 3)
+ProgressTrack.Position = UDim2.new(0, 8, 1, -77)
+ProgressTrack.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+ProgressTrack.BorderSizePixel = 0
+ProgressTrack.ClipsDescendants = true
+ProgressTrack.Parent = Body
+
+local ProgressFill = Instance.new("Frame")
+ProgressFill.Size = UDim2.new(0, 0, 1, 0)
+ProgressFill.BackgroundColor3 = WHITE
+ProgressFill.BorderSizePixel = 0
+ProgressFill.Parent = ProgressTrack
+
+local function setProgress(value, color, instant)
+    value = math.clamp(tonumber(value) or 0, 0, 1)
+    ProgressFill.BackgroundColor3 = color or WHITE
+    local target = { Size = UDim2.new(value, 0, 1, 0) }
+    if instant then
+        local channels = activeTweens[ProgressFill]
+        if channels and channels.Size then
+            pcall(function() channels.Size:Cancel() end)
+            channels.Size = nil
+        end
+        ProgressFill.Size = target.Size
+    else
+        tween(ProgressFill, TweenInfo.new(0.18, Enum.EasingStyle.Quad), target)
+    end
+end
+
 local Status = Instance.new("TextLabel")
 Status.Size = UDim2.new(1, -16, 0, 16)
 Status.Position = UDim2.new(0, 8, 1, -70)
@@ -918,13 +1272,73 @@ SearchBtn.AutoButtonColor = false
 SearchBtn.Parent = Body
 setupRetroButton(SearchBtn)
 
-local function setStatus(text)
+local ToastHost = Instance.new("Frame")
+ToastHost.Name = "Notifications"
+ToastHost.Size = UDim2.new(0, 280, 1, -20)
+ToastHost.Position = UDim2.new(1, -290, 0, 10)
+ToastHost.BackgroundTransparency = 1
+ToastHost.ZIndex = 100
+ToastHost.Parent = ScreenGui
+
+local ToastList = Instance.new("UIListLayout")
+ToastList.Padding = UDim.new(0, 6)
+ToastList.HorizontalAlignment = Enum.HorizontalAlignment.Right
+ToastList.SortOrder = Enum.SortOrder.LayoutOrder
+ToastList.Parent = ToastHost
+
+local toastCounter = 0
+notify = function(message, color)
+    if not guiAlive or not ToastHost.Parent then
+        return
+    end
+    local existing = {}
+    for _, child in ipairs(ToastHost:GetChildren()) do
+        if child.Name == "Toast" then table.insert(existing, child) end
+    end
+    table.sort(existing, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+    while #existing >= 4 do
+        existing[1]:Destroy()
+        table.remove(existing, 1)
+    end
+    toastCounter = toastCounter + 1
+    local toast = Instance.new("TextLabel")
+    toast.Name = "Toast"
+    toast.Size = UDim2.new(1, 0, 0, 34)
+    toast.BackgroundColor3 = BLACK
+    toast.BackgroundTransparency = config.Animations and 1 or 0.08
+    toast.BorderSizePixel = 1
+    toast.BorderColor3 = color or WHITE
+    toast.Font = Enum.Font.Code
+    toast.TextSize = 10
+    toast.TextColor3 = color or WHITE
+    toast.TextXAlignment = Enum.TextXAlignment.Left
+    toast.TextTruncate = Enum.TextTruncate.AtEnd
+    toast.Text = "  > " .. tostring(message)
+    toast.LayoutOrder = toastCounter
+    toast.ZIndex = 100
+    toast.Parent = ToastHost
+
+    local scale = Instance.new("UIScale")
+    scale.Scale = config.Animations and 0.9 or 1
+    scale.Parent = toast
+    tween(toast, TweenInfo.new(0.18, Enum.EasingStyle.Quad), { BackgroundTransparency = 0.08 })
+    tween(scale, TweenInfo.new(0.22, Enum.EasingStyle.Back), { Scale = 1 })
+    task.delay(3.2, function()
+        if not toast.Parent then return end
+        tween(toast, TweenInfo.new(0.16), { BackgroundTransparency = 1, TextTransparency = 1 })
+        tween(scale, TweenInfo.new(0.16), { Scale = 0.92 })
+        task.wait(config.Animations and 0.17 or 0)
+        if toast.Parent then toast:Destroy() end
+    end)
+end
+
+setStatus = function(text)
     if Status and Status.Parent then
-        Status.Text = "> " .. text
+        Status.Text = "> " .. tostring(text)
     end
 end
 
-local function updateBtnText()
+updateBtnText = function()
     if config.AutoHop then
         SearchBtn.Text = "[ STOP AUTO-LOOP ]"
     else
@@ -933,31 +1347,58 @@ local function updateBtnText()
 end
 updateBtnText()
 
-local function updateStats()
+updateStats = function()
+    local n = #Players:GetPlayers()
     local job = tostring(game.JobId or "")
     local shortJob = #job > 8 and (string.sub(job, 1, 8) .. "..") or job
-    local n = #Players:GetPlayers()
-    Stats.Text = string.format("job %s  |  %d here  |  visited %d", shortJob, n, countVisited())
+    Stats.Text = string.format(
+        "%s | %d here | %d seen | hop %d/%d",
+        shortJob,
+        n,
+        countVisited(),
+        sessionStats.hops,
+        sessionStats.failures
+    )
 end
 
 local chatMessageCount = 0
 local russianChatCount = 0
+local uniqueChatters = {}
+local recentChat = {}
+
+local RUSSIAN_SPECIFIC = { [0x401] = true, [0x451] = true, [0x42B] = true, [0x44B] = true, [0x42D] = true, [0x44D] = true, [0x42A] = true, [0x44A] = true }
+local UKRAINIAN_SPECIFIC = { [0x406] = true, [0x456] = true, [0x407] = true, [0x457] = true, [0x404] = true, [0x454] = true, [0x490] = true, [0x491] = true }
 
 local function looksRussian(text)
-    if type(text) ~= "string" then return false end
-    local lower = string.lower(text)
-    -- UTF-8 byte patterns cover Cyrillic; Russian-specific letters increase confidence.
-    local hasCyrillic = string.find(lower, "[\208-\211][\128-\191]") ~= nil
-    local hasRussianSpecific = string.find(lower, "[ёыэъЁЫЭЪ]") ~= nil
-    local hasUkrainianSpecific = string.find(lower, "[іїєґІЇЄҐ]") ~= nil
-    return hasCyrillic and (hasRussianSpecific or not hasUkrainianSpecific)
+    if type(text) ~= "string" or text == "" then return false end
+    local hasCyrillic = false
+    local hasRussianSpecific = false
+    local hasUkrainianSpecific = false
+    local ok = pcall(function()
+        for _, codepoint in utf8.codes(text) do
+            if codepoint >= 0x0400 and codepoint <= 0x052F then
+                hasCyrillic = true
+            end
+            if RUSSIAN_SPECIFIC[codepoint] then hasRussianSpecific = true end
+            if UKRAINIAN_SPECIFIC[codepoint] then hasUkrainianSpecific = true end
+        end
+    end)
+    return ok and hasCyrillic and (hasRussianSpecific or not hasUkrainianSpecific)
 end
 
 local function bumpChat(userId, text)
-    if not userId or userId == LocalPlayer.UserId then
+    if type(userId) ~= "number" or userId == LocalPlayer.UserId or type(text) ~= "string" then
         return
     end
+    -- TextChatService and Player.Chatted can report the same modern-chat message.
+    local now = os.clock()
+    local previous = recentChat[userId]
+    if previous and previous.text == text and now - previous.at < 0.75 then
+        return
+    end
+    recentChat[userId] = { text = text, at = now }
     chatMessageCount = chatMessageCount + 1
+    uniqueChatters[userId] = true
     if looksRussian(text) then
         russianChatCount = russianChatCount + 1
     end
@@ -972,63 +1413,56 @@ pcall(function()
 end)
 
 local scheduleRender
-
-local function trackPlayer(pl)
-    if not pl or pl == LocalPlayer then
-        return
-    end
-    table.insert(chatConns, pl.Chatted:Connect(function(message)
-        bumpChat(pl.UserId, message)
-    end))
-    -- Country lookups yield, so warm the cache concurrently instead of freezing the UI.
-    task.spawn(function()
-        local code = lookupCountry(pl)
-        if code and scheduleRender then
-            scheduleRender()
-        end
-    end)
-end
-
-for _, pl in ipairs(Players:GetPlayers()) do
-    trackPlayer(pl)
-end
-Players.PlayerAdded:Connect(trackPlayer)
-
 local playerCards = {}
-
-local function clearPlayerCards()
-    for _, card in pairs(playerCards) do
-        if card and card.Parent then
-            card:Destroy()
-        end
-    end
-    playerCards = {}
-end
+local friendCache = {}
+local friendLookupInFlight = {}
 
 local function playerSortKey(pl)
-    local name = pl.Name or ""
-    return string.lower(name)
+    return string.lower(pl.Name or "")
+end
+
+local function playerLine(pl)
+    local isLocal = pl == LocalPlayer
+    local cachedCountry = not isLocal and countryCache[pl.UserId] or nil
+    local country = cachedCountry ~= false and cachedCountry or nil
+    local tags = {}
+    if isLocal then table.insert(tags, "YOU") end
+    if friendCache[pl.UserId] == true then table.insert(tags, "FRIEND") end
+    if pl.MembershipType == Enum.MembershipType.Premium then table.insert(tags, "PREMIUM") end
+    if country then table.insert(tags, country) end
+
+    local display = pl.DisplayName
+    local username = pl.Name
+    local line = display and display ~= "" and display ~= username
+        and (display .. " @" .. username) or username
+    if #tags > 0 then
+        line = line .. " [" .. table.concat(tags, "][") .. "]"
+    end
+    return line
+end
+
+local function refreshCard(pl)
+    local record = playerCards[pl.UserId]
+    if record and record.info.Parent then
+        local line = playerLine(pl)
+        if record.info.Text ~= line then
+            record.info.Text = line
+        end
+    end
 end
 
 local function buildCard(pl)
-    local isDonator = (pl.MembershipType == Enum.MembershipType.Premium)
-    local isLocal = pl == LocalPlayer
-    local isFriend = false
-    if not isLocal then
-        local ok, result = pcall(function()
-            return LocalPlayer:IsFriendsWith(pl.UserId)
-        end)
-        isFriend = ok and result == true
-    end
-
     local card = Instance.new("Frame")
     card.Name = "P_" .. tostring(pl.UserId)
     card.Size = UDim2.new(1, -6, 0, 34)
     card.BackgroundColor3 = BLACK
     card.BorderSizePixel = 1
     card.BorderColor3 = WHITE
-    card.LayoutOrder = isLocal and 0 or 1
     card.Parent = Scroll
+
+    local cardScale = Instance.new("UIScale")
+    cardScale.Scale = config.Animations and 0.96 or 1
+    cardScale.Parent = card
 
     local avatar = Instance.new("ImageLabel")
     avatar.Size = UDim2.new(0, 26, 0, 26)
@@ -1037,6 +1471,22 @@ local function buildCard(pl)
     avatar.BorderSizePixel = 1
     avatar.BorderColor3 = WHITE
     avatar.Parent = card
+
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(1, -38, 1, 0)
+    info.Position = UDim2.new(0, 36, 0, 0)
+    info.Text = playerLine(pl)
+    info.TextColor3 = WHITE
+    info.Font = Enum.Font.Code
+    info.TextSize = 10
+    info.TextXAlignment = Enum.TextXAlignment.Left
+    info.TextTruncate = Enum.TextTruncate.AtEnd
+    info.BackgroundTransparency = 1
+    info.Parent = card
+
+    local record = { frame = card, avatar = avatar, info = info, player = pl }
+    playerCards[pl.UserId] = record
+    tween(cardScale, TweenInfo.new(0.16, Enum.EasingStyle.Back), { Scale = 1 })
 
     task.spawn(function()
         local ok, content, isReady = pcall(function()
@@ -1051,325 +1501,390 @@ local function buildCard(pl)
         end
     end)
 
-    local cachedCountry = not isLocal and countryCache[pl.UserId] or nil
-    local country = cachedCountry ~= false and cachedCountry or nil
-
-    local tags = {}
-    if isLocal then
-        table.insert(tags, "YOU")
+    if pl ~= LocalPlayer and friendCache[pl.UserId] == nil and not friendLookupInFlight[pl.UserId] then
+        friendLookupInFlight[pl.UserId] = true
+        task.spawn(function()
+            local ok, result = pcall(function()
+                return LocalPlayer:IsFriendsWith(pl.UserId)
+            end)
+            friendLookupInFlight[pl.UserId] = nil
+            friendCache[pl.UserId] = ok and result == true
+            if guiAlive and pl.Parent then refreshCard(pl) end
+        end)
     end
-    if isFriend then
-        table.insert(tags, "FRIEND")
-    end
-    if isDonator then
-        table.insert(tags, "PREMIUM")
-    end
-    if country then
-        table.insert(tags, country)
-    end
-
-    local display = pl.DisplayName
-    local uname = pl.Name
-    local line
-    if display and display ~= "" and display ~= uname then
-        line = display .. " @" .. uname
-    else
-        line = uname
-    end
-    if #tags > 0 then
-        line = line .. " [" .. table.concat(tags, "][") .. "]"
-    end
-
-    local info = Instance.new("TextLabel")
-    info.Size = UDim2.new(1, -38, 1, 0)
-    info.Position = UDim2.new(0, 36, 0, 0)
-    info.Text = line
-    info.TextColor3 = WHITE
-    info.Font = Enum.Font.Code
-    info.TextSize = 10
-    info.TextXAlignment = Enum.TextXAlignment.Left
-    info.TextTruncate = Enum.TextTruncate.AtEnd
-    info.BackgroundTransparency = 1
-    info.Parent = card
-
-    return card
+    return record
 end
 
 local renderQueued = false
 local function renderPlayers()
-    if not guiAlive then
-        return
-    end
-    clearPlayerCards()
-
+    if not guiAlive then return end
     local list = Players:GetPlayers()
+    local present = {}
     table.sort(list, function(a, b)
-        if a == LocalPlayer then
-            return true
-        end
-        if b == LocalPlayer then
-            return false
-        end
+        if a == LocalPlayer then return true end
+        if b == LocalPlayer then return false end
         return playerSortKey(a) < playerSortKey(b)
     end)
 
-    for _, pl in ipairs(list) do
-        playerCards[pl.UserId] = buildCard(pl)
+    for index, pl in ipairs(list) do
+        present[pl.UserId] = true
+        local record = playerCards[pl.UserId] or buildCard(pl)
+        record.frame.LayoutOrder = index
+        refreshCard(pl)
+    end
+    for userId, record in pairs(playerCards) do
+        if not present[userId] then
+            if record.frame.Parent then record.frame:Destroy() end
+            playerCards[userId] = nil
+        end
     end
     updateStats()
 end
 
 scheduleRender = function()
-    if renderQueued then
-        return
-    end
+    if renderQueued then return end
     renderQueued = true
     task.defer(function()
         renderQueued = false
-        if guiAlive then
-            renderPlayers()
-        end
+        if guiAlive then renderPlayers() end
     end)
 end
 
+local function trackPlayer(pl)
+    if not pl or playerConns[pl.UserId] then return end
+    local conns = {}
+    playerConns[pl.UserId] = conns
+    if pl ~= LocalPlayer then
+        table.insert(conns, pl.Chatted:Connect(function(message)
+            bumpChat(pl.UserId, message)
+        end))
+        task.spawn(function()
+            local code = lookupCountry(pl)
+            if code and scheduleRender then scheduleRender() end
+        end)
+    end
+    table.insert(conns, pl:GetPropertyChangedSignal("DisplayName"):Connect(scheduleRender))
+    table.insert(conns, pl:GetPropertyChangedSignal("MembershipType"):Connect(scheduleRender))
+    scheduleRender()
+end
+
+for _, pl in ipairs(Players:GetPlayers()) do
+    trackPlayer(pl)
+end
+rememberConnection(Players.PlayerAdded:Connect(trackPlayer))
+rememberConnection(Players.PlayerRemoving:Connect(function(pl)
+    disconnectPlayer(pl.UserId)
+    recentChat[pl.UserId] = nil
+    countryLookupInFlight[pl.UserId] = nil
+    scheduleRender()
+end))
+
 local function parseHttpResponse(res)
+    if type(res) == "string" then
+        return 200, res
+    end
     if type(res) ~= "table" then
         return nil, nil
     end
-    local status = res.StatusCode or res.Status or res.status_code or res.status
+    local status = tonumber(res.StatusCode or res.Status or res.status_code or res.status)
     local body = res.Body or res.body or res.SuccessBody
     return status, body
 end
 
-local function httpGet(url)
+local function hopStillActive(token)
+    return guiAlive and isHopping and token == hopToken
+end
+
+local function httpGet(url, token)
     local httpRequest = getHttpRequest()
-    if not httpRequest then
-        return nil, "no executor http"
-    end
+    local lastError = "http unavailable"
 
     for attempt = 1, HTTP_RETRIES do
-        if not guiAlive then
+        if not hopStillActive(token) then
             return nil, "stopped"
         end
-        local success, res = pcall(function()
-            return httpRequest({
-                Url = url,
-                Method = "GET",
-                Headers = { ["Accept"] = "application/json" },
-            })
-        end)
-        if success and res then
-            local status, body = parseHttpResponse(res)
-            if type(status) == "number" and status == 429 then
-                task.wait(0.6 * attempt)
-            elseif type(body) == "string" and body ~= "" then
-                if (not status) or status == 200 then
-                    return body, nil
-                end
-                task.wait(0.25 * attempt)
-            else
-                task.wait(0.25 * attempt)
-            end
+        local success, res
+        if type(httpRequest) == "function" then
+            success, res = pcall(function()
+                return httpRequest({
+                    Url = url,
+                    Method = "GET",
+                    Headers = { ["Accept"] = "application/json" },
+                })
+            end)
         else
-            task.wait(0.25 * attempt)
+            -- Several executors expose game:HttpGet but no request function.
+            success, res = pcall(function()
+                return game:HttpGet(url)
+            end)
         end
+
+        if success then
+            local status, body = parseHttpResponse(res)
+            if type(body) == "string" and body ~= ""
+                and (not status or status == 0 or (status >= 200 and status < 300))
+            then
+                return body, nil
+            end
+            if status and status ~= 429 and status >= 400 and status < 500 then
+                return nil, "api http " .. tostring(status)
+            end
+            lastError = status and ("api http " .. tostring(status)) or "empty http response"
+        else
+            lastError = "http request failed"
+        end
+
+        local backoff = math.min(2.5, 0.3 * (2 ^ (attempt - 1))) + RNG:NextNumber(0, 0.15)
+        task.wait(backoff)
     end
-    return nil, "http failed"
+    return nil, lastError
+end
+
+local function candidateScore(server)
+    local occupancy = server.maxPlayers > 0 and server.playing / server.maxPlayers or 0
+    local pingScore = server.ping and math.clamp(1 - server.ping / 500, 0, 1) or 0.45
+    local fpsScore = server.fps and math.clamp(server.fps / 60, 0, 1) or 0.5
+    return occupancy * 45 + pingScore * 35 + fpsScore * 20 + RNG:NextNumber(0, 3)
 end
 
 local function pickServer(valid)
-    if #valid == 0 then
-        return nil
+    if #valid == 0 then return nil end
+    local mode = config.SelectionMode
+    if mode == "RANDOM" then
+        return valid[RNG:NextInteger(1, #valid)]
     end
-    if config.PreferFull then
+    if mode == "FULL" then
         table.sort(valid, function(a, b)
-            return (a.playing or 0) > (b.playing or 0)
+            if a.playing == b.playing then return a.id < b.id end
+            return a.playing > b.playing
         end)
-        local top = math.min(5, #valid)
-        return valid[math.random(1, top)].id
+    elseif mode == "LOW PING" then
+        table.sort(valid, function(a, b)
+            local aPing = a.ping or math.huge
+            local bPing = b.ping or math.huge
+            if aPing == bPing then return a.playing > b.playing end
+            return aPing < bPing
+        end)
+    else
+        for _, server in ipairs(valid) do
+            server.score = candidateScore(server)
+        end
+        table.sort(valid, function(a, b) return a.score > b.score end)
     end
-    return valid[math.random(1, #valid)].id
+    -- Add slight diversity while still selecting from the strategy's best results.
+    return valid[RNG:NextInteger(1, math.min(6, #valid))]
 end
 
-local function getUnvisitedServer()
-    if not getHttpRequest() then
-        return nil, "executor has no http request"
-    end
-
-    local sortOrders = { "Asc", "Desc" }
-    local selectedSort = sortOrders[math.random(1, #sortOrders)]
+local function getUnvisitedServer(token)
+    local selectedSort = config.SelectionMode == "RANDOM"
+        and (RNG:NextInteger(0, 1) == 0 and "Asc" or "Desc") or "Desc"
     local cursor = ""
+    local candidates = {}
+    local candidateIds = {}
+    local targetCount = config.SelectionMode == "FULL" and 24 or TARGET_CANDIDATES
 
     for page = 1, MAX_API_PAGES do
-        if not guiAlive then
-            return nil, "stopped"
-        end
+        if not hopStillActive(token) then return nil, "stopped" end
+        setStatus(string.format("scanning API page %d/%d (%d candidates)", page, MAX_API_PAGES, #candidates))
+        setProgress((page - 1) / MAX_API_PAGES, WHITE)
 
         local cursorPart = ""
         if cursor ~= "" then
             local encoded = cursor
-            pcall(function()
-                encoded = HttpService:UrlEncode(cursor)
-            end)
+            pcall(function() encoded = HttpService:UrlEncode(cursor) end)
             cursorPart = "&cursor=" .. encoded
         end
-
         local url = string.format(
             "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&excludeFullGames=true&limit=100%s",
             game.PlaceId,
             selectedSort,
             cursorPart
         )
+        local body, err = httpGet(url, token)
+        if not body then return nil, err or "api error" end
 
-        local body, err = httpGet(url)
-        if not body then
-            return nil, err or "api error"
-        end
-
-        local decSuccess, data = pcall(function()
-            return HttpService:JSONDecode(body)
-        end)
-        if not (decSuccess and type(data) == "table" and type(data.data) == "table") then
+        local decoded, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not (decoded and type(data) == "table" and type(data.data) == "table") then
             return nil, "bad api payload"
         end
-
-        local valid = {}
-        for _, s in ipairs(data.data) do
-            if type(s) == "table" and type(s.id) == "string" then
-                local playing = tonumber(s.playing) or 0
-                local maxPlayers = tonumber(s.maxPlayers) or 0
-                local minNeed = config.MinPlayers or 1
-                if playing < maxPlayers and playing >= minNeed then
-                    if s.id ~= game.JobId and not visitedServers[s.id] then
-                        table.insert(valid, { id = s.id, playing = playing })
-                    end
+        for _, server in ipairs(data.data) do
+            if type(server) == "table" and type(server.id) == "string" and server.id ~= ""
+                and #server.id <= 100 and not candidateIds[server.id]
+            then
+                local playing = tonumber(server.playing) or 0
+                local maxPlayers = tonumber(server.maxPlayers) or 0
+                local ping = tonumber(server.ping)
+                local fps = tonumber(server.fps)
+                local enoughPlayers = playing >= config.MinPlayers
+                local enoughSlots = maxPlayers > 0 and maxPlayers - playing >= config.MinFreeSlots
+                local pingAllowed = config.MaxPing <= 0 or not ping or ping <= config.MaxPing
+                if enoughPlayers and enoughSlots and pingAllowed
+                    and server.id ~= game.JobId and not visitedServers[server.id]
+                then
+                    candidateIds[server.id] = true
+                    table.insert(candidates, {
+                        id = server.id,
+                        playing = playing,
+                        maxPlayers = maxPlayers,
+                        ping = ping,
+                        fps = fps,
+                    })
                 end
             end
         end
-
-        local chosen = pickServer(valid)
-        if chosen then
-            return chosen, nil
-        end
-
-        if type(data.nextPageCursor) == "string" and data.nextPageCursor ~= "" then
-            cursor = data.nextPageCursor
-        else
-            break
-        end
-        task.wait(0.12)
+        if #candidates >= targetCount then break end
+        if type(data.nextPageCursor) ~= "string" or data.nextPageCursor == "" then break end
+        cursor = data.nextPageCursor
+        task.wait(0.08)
     end
 
+    local chosen = pickServer(candidates)
+    if chosen then
+        setProgress(1, GREEN)
+        return chosen, nil
+    end
     return nil, "no unvisited servers"
 end
 
 local function recycleVisitedIfStuck()
-    local kept = math.max(20, math.floor(countVisited() / 2))
+    local before = countVisited()
+    local kept = math.max(1, math.floor(before / 2))
     forgetOldestVisited(kept)
-    setStatus("visited list recycled (" .. tostring(countVisited()) .. " kept)")
+    setStatus("history recycled (" .. tostring(countVisited()) .. " kept)")
     updateStats()
 end
 
 local function flashMatch()
     task.spawn(function()
         for _ = 1, 3 do
-            if not (guiAlive and Main.Parent) then
-                return
-            end
-            TweenService:Create(Main, TweenInfo.new(0.12), { BorderColor3 = Color3.fromRGB(160, 255, 160) }):Play()
+            if not (guiAlive and Main.Parent) then return end
+            tween(Main, TweenInfo.new(0.12), { BorderColor3 = GREEN })
             task.wait(0.14)
-            TweenService:Create(Main, TweenInfo.new(0.12), { BorderColor3 = WHITE }):Play()
+            tween(Main, TweenInfo.new(0.12), { BorderColor3 = WHITE })
             task.wait(0.14)
         end
     end)
 end
 
-local function startSearchSpinner()
+local function startSearchSpinner(token)
     task.spawn(function()
         local frames = { "[ / ] SEARCHING...", "[ - ] SEARCHING...", "[ \\ ] SEARCHING...", "[ | ] SEARCHING..." }
         local idx = 1
-        while isHopping and guiAlive do
+        while hopStillActive(token) do
             SearchBtn.Text = frames[idx]
             idx = (idx % #frames) + 1
             task.wait(0.12)
         end
-        if guiAlive then
-            updateBtnText()
-        end
+        if guiAlive and token == hopToken then updateBtnText() end
     end)
 end
 
 local executeHop
+local queueWarningShown = false
+local queuePrepared = false
 
-executeHop = function()
-    if isHopping or not guiAlive then
-        return
-    end
-    isHopping = true
-    startSearchSpinner()
-    setStatus("searching public servers")
-
-    setQueue()
-
-    local targetServer, err = getUnvisitedServer()
-
-    if not guiAlive then
-        isHopping = false
-        return
-    end
-
-    if targetServer then
-        visitedServers[targetServer] = os.time()
-        visitedServers = pruneVisited(visitedServers)
+local function rollbackPending(serverId)
+    if serverId and pendingServerId == serverId then
+        visitedServers[serverId] = nil
+        pendingServerId = nil
         saveVisited(visitedServers)
         updateStats()
-        setStatus("teleport " .. string.sub(targetServer, 1, 8) .. "..")
-
-        local ok = pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer, LocalPlayer)
-        end)
-        if not ok then
-            setStatus("teleport call failed, retrying place")
-        end
-
-        task.delay(6, function()
-            if isHopping and guiAlive then
-                setStatus("teleport timed out, fallback hop")
-                pcall(function()
-                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
-                end)
-            end
-        end)
-    else
-        isHopping = false
-        updateBtnText()
-        if err == "no unvisited servers" then
-            recycleVisitedIfStuck()
-        else
-            setStatus(err or "no server found")
-        end
-        if config.AutoHop then
-            task.delay(2, function()
-                if config.AutoHop and guiAlive and not isHopping then
-                    executeHop()
-                end
-            end)
-        end
     end
 end
 
-TeleportService.TeleportInitFailed:Connect(function(_, result)
+local function retryAuto(token, delaySeconds)
+    task.delay(delaySeconds or 1.5, function()
+        if guiAlive and config.AutoHop and not isHopping and token == hopToken then
+            executeHop("retry")
+        end
+    end)
+end
+
+local function failHop(token, message, serverId)
+    if token ~= hopToken then return end
+    rollbackPending(serverId)
     isHopping = false
-    if not guiAlive then
+    sessionStats.failures = sessionStats.failures + 1
+    setProgress(1, RED)
+    setStatus(message)
+    updateBtnText()
+    updateStats()
+    notify(message, RED)
+    retryAuto(token, 1.5)
+end
+
+executeHop = function()
+    if isHopping or not guiAlive then return end
+    isHopping = true
+    hopToken = hopToken + 1
+    local token = hopToken
+    pendingServerId = nil
+    setProgress(0, WHITE, true)
+    startSearchSpinner(token)
+    setStatus("searching public servers")
+
+    if not queuePrepared then queuePrepared = setQueue() end
+    local queueReady = queuePrepared
+    if config.AutoHop and not queueReady and not queueWarningShown then
+        queueWarningShown = true
+        notify("queue_on_teleport unavailable; auto-loop may not resume", RED)
+    end
+
+    local target, err = getUnvisitedServer(token)
+    if not hopStillActive(token) then return end
+
+    if not target then
+        isHopping = false
+        if err == "no unvisited servers" then
+            recycleVisitedIfStuck()
+        else
+            sessionStats.failures = sessionStats.failures + 1
+            setStatus(err or "no server found")
+            notify(err or "No server found", RED)
+        end
+        setProgress(1, RED)
+        updateBtnText()
+        updateStats()
+        retryAuto(token, 2)
         return
     end
-    updateBtnText()
-    setStatus("teleport failed: " .. tostring(result))
-    task.wait(1.5)
-    if config.AutoHop and guiAlive then
-        executeHop()
+
+    pendingServerId = target.id
+    visitedServers[target.id] = os.time()
+    visitedServers = pruneVisited(visitedServers)
+    saveVisited(visitedServers)
+    sessionStats.hops = sessionStats.hops + 1
+    updateStats()
+
+    local details = string.format("%d/%d", target.playing, target.maxPlayers)
+    if target.ping then details = details .. string.format(" %dms", math.floor(target.ping)) end
+    setStatus("teleport " .. string.sub(target.id, 1, 8) .. ".. | " .. details)
+    notify("Server selected: " .. details, GREEN)
+
+    local ok, teleportError = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
+    end)
+    if not ok then
+        failHop(token, "teleport call failed: " .. tostring(teleportError), target.id)
+        return
     end
-end)
+
+    task.delay(TELEPORT_TIMEOUT, function()
+        if hopStillActive(token) and pendingServerId == target.id then
+            failHop(token, "teleport timed out; selecting another server", target.id)
+        end
+    end)
+end
+
+rememberConnection(TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
+    if player ~= LocalPlayer or not isHopping or not guiAlive then return end
+    local token = hopToken
+    local message = "teleport failed: " .. tostring(result)
+    if type(errorMessage) == "string" and errorMessage ~= "" then
+        message = message .. " (" .. string.sub(errorMessage, 1, 80) .. ")"
+    end
+    failHop(token, message, pendingServerId)
+end))
 
 local function countDonators()
     local n = 0
@@ -1398,93 +1913,112 @@ local function getRegionStats(region)
     return matched, known, percent
 end
 
+local function countKeys(data)
+    local count = 0
+    for _ in pairs(data) do count = count + 1 end
+    return count
+end
+
 local function evaluateServer()
     evaluateToken = evaluateToken + 1
     local token = evaluateToken
-
-    if not config.AutoHop then
-        return
-    end
+    if not config.AutoHop or isHopping then return end
 
     chatMessageCount = 0
     russianChatCount = 0
-    local seconds = config.AnalyzeSeconds or 5
-    for i = seconds, 1, -1 do
-        if not guiAlive or not config.AutoHop or token ~= evaluateToken then
-            if guiAlive then
-                updateBtnText()
-            end
+    table.clear(uniqueChatters)
+    local seconds = config.AnalyzeSeconds
+    setProgress(0, WHITE, true)
+    for elapsed = 0, seconds - 1 do
+        if not guiAlive or not config.AutoHop or token ~= evaluateToken or isHopping then
+            if guiAlive then updateBtnText() end
             return
         end
-        SearchBtn.Text = string.format("[ ANALYZING (%ds)... ]", i)
-        setStatus(string.format("listening chat / scanning players (%ds)", i))
+        local remaining = seconds - elapsed
+        SearchBtn.Text = string.format("[ ANALYZING (%ds)... ]", remaining)
+        setStatus(string.format("listening chat / scanning players (%ds)", remaining))
+        setProgress(elapsed / seconds, WHITE)
         task.wait(1)
     end
 
-    if not guiAlive or not config.AutoHop or token ~= evaluateToken then
-        if guiAlive then
-            updateBtnText()
-        end
+    if not guiAlive or not config.AutoHop or token ~= evaluateToken or isHopping then
+        if guiAlive then updateBtnText() end
         return
+    end
+
+    -- Give outstanding country calls a short grace period before rejecting a region.
+    local regionDeadline = os.clock() + 3
+    while config.PeopleRegion ~= "ANY" and next(countryLookupInFlight) ~= nil and os.clock() < regionDeadline do
+        if not guiAlive or not config.AutoHop or token ~= evaluateToken or isHopping then return end
+        setStatus("finishing audience region lookup")
+        task.wait(0.15)
     end
 
     local donatorCount = countDonators()
     local playerCount = #Players:GetPlayers()
-    local passDonators = (not config.FilterDonators) or (donatorCount >= 1)
-    local passChat = (not config.FilterChat) or (chatMessageCount >= 1)
-    local passPlayers = playerCount >= (config.MinPlayers or 1)
+    local chatterCount = countKeys(uniqueChatters)
+    local passDonators = not config.FilterDonators or donatorCount >= 1
+    local passChat = not config.FilterChat or chatMessageCount >= 1
+    local passPlayers = playerCount >= config.MinPlayers
     local regionMatched, regionKnown, regionPercent = getRegionStats(config.PeopleRegion)
     local passRegion = config.PeopleRegion == "ANY"
-        or (regionKnown > 0 and regionMatched > 0 and regionPercent >= (config.MinRegionPercent or 35))
+        or (regionKnown > 0 and regionMatched > 0 and regionPercent >= config.MinRegionPercent)
         or (config.PeopleRegion == "RUSSIAN" and russianChatCount > 0)
 
     if passDonators and passChat and passPlayers and passRegion then
         SearchBtn.Text = "[ MATCH FOUND ]"
-        setStatus(string.format("match prem=%d chat=%d ru=%d region=%d/%d (%d%%)", donatorCount, chatMessageCount, russianChatCount, regionMatched, regionKnown, regionPercent))
+        setProgress(1, GREEN)
+        setStatus(string.format(
+            "match prem=%d chat=%d/%d ru=%d region=%d/%d (%d%%)",
+            donatorCount, chatMessageCount, chatterCount, russianChatCount,
+            regionMatched, regionKnown, regionPercent
+        ))
         config.AutoHop = false
-        saveSettings(config)
+        saveSettings(config, true)
         flashMatch()
+        notify("Matching server found", GREEN)
         task.delay(1.4, function()
-            if guiAlive and not config.AutoHop then
-                updateBtnText()
-            end
+            if guiAlive and not config.AutoHop and token == evaluateToken then updateBtnText() end
         end)
+        return
+    end
+
+    local reasons = {}
+    if not passDonators then table.insert(reasons, "no premium") end
+    if not passChat then table.insert(reasons, "silent chat") end
+    if not passPlayers then table.insert(reasons, "few players") end
+    if not passRegion then table.insert(reasons, "wrong region " .. tostring(regionPercent) .. "%") end
+    local why = table.concat(reasons, ", ")
+    SearchBtn.Text = "[ NEXT SERVER ]"
+    setProgress(1, RED)
+    setStatus(string.format(
+        "skip (%s) prem=%d chat=%d/%d ru=%d pl=%d",
+        why, donatorCount, chatMessageCount, chatterCount, russianChatCount, playerCount
+    ))
+    task.wait(0.45)
+    if config.AutoHop and guiAlive and token == evaluateToken and not isHopping then
+        executeHop()
     else
-        local reasons = {}
-        if not passDonators then
-            table.insert(reasons, "no premium")
-        end
-        if not passChat then
-            table.insert(reasons, "silent chat")
-        end
-        if not passPlayers then
-            table.insert(reasons, "few players")
-        end
-        if not passRegion then
-            table.insert(reasons, "wrong region " .. tostring(regionPercent) .. "%")
-        end
-        local why = table.concat(reasons, ", ")
-        SearchBtn.Text = "[ NEXT SERVER ]"
-        setStatus(string.format("skip (%s) prem=%d chat=%d ru=%d pl=%d", why, donatorCount, chatMessageCount, russianChatCount, playerCount))
-        task.wait(0.45)
-        if config.AutoHop and guiAlive and token == evaluateToken then
-            executeHop()
-        else
-            updateBtnText()
-        end
+        updateBtnText()
     end
 end
 
 SearchBtn.MouseButton1Click:Connect(function()
     config.AutoHop = not config.AutoHop
-    saveSettings(config)
+    saveSettings(config, true)
     updateBtnText()
 
     if config.AutoHop then
-        task.spawn(evaluateServer)
+        if isHopping then
+            setStatus("auto-loop armed for the next server")
+            notify("Auto-loop enabled", GREEN)
+        else
+            task.spawn(evaluateServer)
+        end
     else
         evaluateToken = evaluateToken + 1
-        setStatus("auto-loop stopped")
+        setStatus(isHopping and "auto-loop stopped; current hop continues" or "auto-loop stopped")
+        setProgress(0, WHITE)
     end
 end)
 
@@ -1493,12 +2027,79 @@ HopOnceBtn.MouseButton1Click:Connect(function()
         setStatus("already hopping")
         return
     end
+    evaluateToken = evaluateToken + 1
     task.spawn(executeHop)
 end)
 
-Players.PlayerAdded:Connect(scheduleRender)
-Players.PlayerRemoving:Connect(scheduleRender)
 renderPlayers()
+
+-- Keep the interface usable on small screens and after a resolution change.
+local responsiveUpdateToken = 0
+local function updateResponsiveScale()
+    responsiveUpdateToken = responsiveUpdateToken + 1
+    local token = responsiveUpdateToken
+    local viewport = viewportSize()
+    responsiveMainScale = math.clamp(math.min((viewport.X - 12) / 340, (viewport.Y - 12) / 540), GUI_MIN_SCALE, 1)
+    tween(MainScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = responsiveMainScale })
+    InfoWin.setScale(math.clamp(math.min((viewport.X - 12) / 340, (viewport.Y - 12) / 420), GUI_MIN_SCALE, 1))
+    SettingsWin.setScale(math.clamp(math.min((viewport.X - 12) / 310, (viewport.Y - 12) / 460), GUI_MIN_SCALE, 1))
+    clampToViewport(Main)
+    if InfoWin.Frame.Visible then clampToViewport(InfoWin.Frame) end
+    if SettingsWin.Frame.Visible then clampToViewport(SettingsWin.Frame) end
+    if config.Animations then
+        task.delay(0.13, function()
+            if guiAlive and token == responsiveUpdateToken then
+                clampToViewport(Main)
+                if InfoWin.Frame.Visible then clampToViewport(InfoWin.Frame) end
+                if SettingsWin.Frame.Visible then clampToViewport(SettingsWin.Frame) end
+            end
+        end)
+    end
+end
+
+local cameraViewportConn = nil
+local function bindViewportListener()
+    if cameraViewportConn then
+        pcall(function() cameraViewportConn:Disconnect() end)
+        cameraViewportConn = nil
+    end
+    if workspace.CurrentCamera then
+        cameraViewportConn = workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale)
+    end
+    task.defer(updateResponsiveScale)
+end
+bindViewportListener()
+rememberConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewportListener))
+rememberConnection({
+    Disconnect = function()
+        if cameraViewportConn then cameraViewportConn:Disconnect() end
+    end,
+})
+
+local interfaceVisible = true
+rememberConnection(UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or input.KeyCode ~= Enum.KeyCode.RightShift then return end
+    interfaceVisible = not interfaceVisible
+    if not interfaceVisible then
+        InfoWin.Frame.Visible = false
+        SettingsWin.Frame.Visible = false
+        ToastHost.Visible = false
+        if config.Animations then
+            tween(MainScale, TweenInfo.new(0.12, Enum.EasingStyle.Quad), { Scale = responsiveMainScale * 0.94 })
+            task.delay(0.12, function()
+                if guiAlive and not interfaceVisible then Main.Visible = false end
+            end)
+        else
+            Main.Visible = false
+        end
+    else
+        Main.Visible = true
+        ToastHost.Visible = true
+        if config.Animations then MainScale.Scale = responsiveMainScale * 0.92 end
+        tween(MainScale, TweenInfo.new(0.2, Enum.EasingStyle.Back), { Scale = responsiveMainScale })
+        clampToViewport(Main)
+    end
+end))
 
 if config.AutoHop then
     task.spawn(evaluateServer)
