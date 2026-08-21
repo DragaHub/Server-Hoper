@@ -20,9 +20,9 @@ local MAX_API_PAGES = 8
 local HTTP_RETRIES = 4
 local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
-local TELEPORT_TIMEOUT = 10
+local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.4"
+local VERSION = "2.5"
 
 local guiAlive = true
 local isHopping = false
@@ -161,6 +161,14 @@ if type(game.JobId) == "string" and game.JobId ~= "" then
 end
 visitedServers = pruneVisited(visitedServers)
 saveVisited(visitedServers)
+
+-- Servers that just failed (typically the slot filled up before our
+-- teleport landed) are kept out of the candidate pool for a short
+-- cooldown. Without this, a rolled-back server is instantly re-selected,
+-- fails again, and the hopper looks permanently stuck on a full server.
+local failedServers = {}
+local FAILED_RETRY_COOLDOWN = 90
+local lastHopStart = 0
 
 local function forgetOldestVisited(keep)
     visitedServers = pruneVisited(visitedServers, keep)
@@ -1436,7 +1444,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.4
+> SERVER FINDER v2.5
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1448,9 +1456,12 @@ InfoTextLabel.Text = [[
    LOW PING and RANDOM strategies are also available.
 
 3. SAFE TELEPORTS
-   Stale timeout callbacks are cancelled. Failed
-   targets are rolled back from history and retried
-   only while auto-loop is enabled.
+   Stale timeout callbacks are cancelled. Servers
+   that fill up before we land (full-server race)
+   are blacklisted for a short cooldown so the hop
+   immediately moves on to another server instead
+   of re-selecting the same full one. A watchdog
+   guarantees the hopper never freezes mid-hop.
 
 4. FILTERS
    Premium, active chat, minimum players, free slots,
@@ -2394,7 +2405,9 @@ local function getUnvisitedServer(token)
                 local enoughPlayers = playing >= config.MinPlayers
                 local enoughSlots = maxPlayers > 0 and maxPlayers - playing >= config.MinFreeSlots
                 local pingAllowed = config.MaxPing <= 0 or not ping or ping <= config.MaxPing
-                if enoughPlayers and enoughSlots and pingAllowed
+                local failedAt = failedServers[server.id]
+                local cooledDown = not failedAt or (os.time() - failedAt) >= FAILED_RETRY_COOLDOWN
+                if enoughPlayers and enoughSlots and pingAllowed and cooledDown
                     and server.id ~= game.JobId and not visitedServers[server.id]
                 then
                     candidateIds[server.id] = true
@@ -2524,12 +2537,19 @@ local executeHop
 local queueWarningShown = false
 local queuePrepared = false
 
-local function rollbackPending(serverId)
-    if serverId and pendingServerId == serverId then
-        visitedServers[serverId] = nil
+-- Handle a server that failed to receive us. It is removed from the
+-- persisted history so future sessions may still try it, but blacklisted
+-- in this session so we do not immediately re-pick the same full server.
+local function markServerFailed(serverId)
+    if pendingServerId and pendingServerId == serverId then
         pendingServerId = nil
+    end
+    if serverId and visitedServers[serverId] ~= nil then
+        visitedServers[serverId] = nil
         saveVisited(visitedServers)
-        updateStats()
+    end
+    if serverId then
+        failedServers[serverId] = os.time()
     end
 end
 
@@ -2543,7 +2563,7 @@ end
 
 local function failHop(token, message, serverId)
     if token ~= hopToken then return end
-    rollbackPending(serverId)
+    markServerFailed(serverId)
     isHopping = false
     sessionStats.failures = sessionStats.failures + 1
     setProgress(1, RED)
@@ -2560,6 +2580,7 @@ executeHop = function()
     isHopping = true
     hopToken = hopToken + 1
     local token = hopToken
+    lastHopStart = os.clock()
     pendingServerId = nil
     setProgress(0, P(), true)
     startSearchSpinner(token)
@@ -2628,14 +2649,21 @@ executeHop = function()
     end
 
     task.delay(TELEPORT_TIMEOUT, function()
-        if hopStillActive(token) and pendingServerId == target.id then
-            failHop(token, "teleport timed out; selecting another server", target.id)
+        if hopStillActive(token) then
+            failHop(token, "teleport timed out; selecting another server", pendingServerId or target.id)
         end
     end)
 end
 
 rememberConnection(TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
-    if player ~= LocalPlayer or not isHopping or not guiAlive then return end
+    if not guiAlive or not isHopping then return end
+    -- We only ever initiate teleports for the local player, so a failure
+    -- while hopping is ours. Some executors pass nil or a copied Player
+    -- here; when the argument can be identified as someone else, skip it.
+    if player and player ~= LocalPlayer then
+        local okId, userId = pcall(function() return player.UserId end)
+        if okId and userId ~= LocalPlayer.UserId then return end
+    end
     local token = hopToken
     local message = "teleport failed: " .. tostring(result)
     if type(errorMessage) == "string" and errorMessage ~= "" then
@@ -2643,6 +2671,18 @@ rememberConnection(TeleportService.TeleportInitFailed:Connect(function(player, r
     end
     failHop(token, message, pendingServerId)
 end))
+
+-- Safety watchdog: if a hop ever gets stuck (teleport neither lands nor
+-- reports a failure), force-recover so the auto-loop keeps going instead
+-- of silently freezing forever.
+task.spawn(function()
+    while guiAlive do
+        if isHopping and (os.clock() - lastHopStart) > (TELEPORT_TIMEOUT + 3) then
+            failHop(hopToken, "hop stalled; recovering and retrying", pendingServerId)
+        end
+        task.wait(1)
+    end
+end)
 
 local function countDonators()
     local n = 0
