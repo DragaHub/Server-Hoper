@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 10
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.2"
+local VERSION = "2.3"
 
 local guiAlive = true
 local isHopping = false
@@ -436,7 +436,7 @@ local THEMES = {
 local currentTheme = "TERMINAL GREEN"
 local currentPalette = THEMES[currentTheme]
 
--- Live ink colour — all bright accents read from here.
+-- Live ink colour -- all bright accents read from here.
 local function P()
     return currentPalette.ink
 end
@@ -450,62 +450,100 @@ local function M()
     return currentPalette.muted
 end
 
--- Smoothly morph every live accent on screen from one theme to the next.
+-- Numeric colour comparison. Some executors implement Color3 == by
+-- identity instead of by component value, so comparing .R/.G/.B as
+-- plain numbers is the only reliable way to match colours.
+local function colorDistanceSq(a, b)
+    local dr = a.R - b.R
+    local dg = a.G - b.G
+    local db = a.B - b.B
+    return dr * dr + dg * dg + db * db
+end
+
+-- Decide which palette role (ink/dim/muted) a colour belongs to by
+-- matching it against every theme. Robust to copied Colour3 values and
+-- to executors with broken colour equality.
+local function classifyRole(color)
+    local bestRole, bestDist = nil, 2000
+    for _, theme in pairs(THEMES) do
+        for role, col in pairs(theme) do
+            local dist = colorDistanceSq(color, col)
+            if dist < bestDist then
+                bestRole, bestDist = role, dist
+            end
+        end
+    end
+    return bestDist <= 64 and bestRole or nil
+end
+
+-- Recolour every accent currently on screen. Colours are applied
+-- directly (guaranteed to work), with an optional short tween played
+-- over the top so the change still reads as a smooth morph. A delayed
+-- safety net forces the final colour in case the executor's tween
+-- never actually animates.
 local function applyTheme(name)
     local target = THEMES[name]
     if not target or target == currentPalette then
         return
     end
-    local fromPalette = currentPalette
     currentPalette = target
     currentTheme = name
 
-    local function remap(color)
-        if color == fromPalette.ink then return target.ink end
-        if color == fromPalette.dim then return target.dim end
-        if color == fromPalette.muted then return target.muted end
-        return nil
-    end
-
-    -- Snapshot the colours currently on screen so interrupted tweens do
-    -- not leave half-morphed UI behind.
-    local snapshot = {}
-    for _, instance in ipairs(ScreenGui:GetDescendants()) do
-        if instance:IsA("GuiObject") then
-            local item = {
-                border = instance.BorderColor3,
-                background = instance.BackgroundColor3,
-            }
-            if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-                item.text = instance.TextColor3
-            end
-            if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-                item.image = instance.ImageColor3
-            end
-            snapshot[instance] = item
-        end
-    end
-
-    local duration = config.Animations and 0.4 or 0
-    for instance, item in pairs(snapshot) do
-        if instance.Parent then
-            local props = {}
-            local mapped = remap(item.text or nil)
-            if mapped then props.TextColor3 = mapped end
-            mapped = remap(item.image or nil)
-            if mapped then props.ImageColor3 = mapped end
-            mapped = remap(item.border)
-            if mapped then props.BorderColor3 = mapped end
-            mapped = remap(item.background)
-            if mapped then props.BackgroundColor3 = mapped end
-            if next(props) then
-                if duration > 0 then
-                    tween(instance, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
-                else
-                    for key, value in pairs(props) do
-                        instance[key] = value
+    local assignments = {}
+    local okScan = pcall(function()
+        for _, instance in ipairs(ScreenGui:GetDescendants()) do
+            if instance:IsA("GuiObject") then
+                local role = classifyRole(instance.BorderColor3)
+                if role then
+                    table.insert(assignments, { instance = instance, prop = "BorderColor3", to = target[role] })
+                end
+                -- Backgrounds that are palette colours (separator lines,
+                -- progress fill/glow, shine) must follow the theme too.
+                role = classifyRole(instance.BackgroundColor3)
+                if role then
+                    table.insert(assignments, { instance = instance, prop = "BackgroundColor3", to = target[role] })
+                end
+                if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+                    role = classifyRole(instance.TextColor3)
+                    if role then
+                        table.insert(assignments, { instance = instance, prop = "TextColor3", to = target[role] })
                     end
                 end
+                if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+                    role = classifyRole(instance.ImageColor3)
+                    if role then
+                        table.insert(assignments, { instance = instance, prop = "ImageColor3", to = target[role] })
+                    end
+                end
+            end
+        end
+    end)
+    if not okScan then
+        assignments = {}
+    end
+
+    local animated = config.Animations
+    for _, assignment in ipairs(assignments) do
+        local instance = assignment.instance
+        if instance and instance.Parent then
+            local ok, anim
+            if animated then
+                ok, anim = pcall(function()
+                    return tween(instance, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        [assignment.prop] = assignment.to,
+                    })
+                end)
+            end
+            if ok and anim then
+                -- Force the final colour once the tween window closes.
+                task.delay(0.35, function()
+                    if instance and instance.Parent then
+                        instance[assignment.prop] = assignment.to
+                    end
+                end)
+            else
+                -- Direct fallback: recolour even if TweenService misbehaves.
+                instance[assignment.prop] = assignment.to
             end
         end
     end
@@ -732,14 +770,14 @@ end
 local function pulseBorder(frame)
     task.spawn(function()
         while guiAlive and frame.Parent do
-            if frame.Visible and config.Animations then
+            if frame.Visible and config.Animations and not isHopping then
                 tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = M() })
             end
             task.wait(1.2)
             if not (guiAlive and frame.Parent) then
                 break
             end
-            if frame.Visible and config.Animations then
+            if frame.Visible and config.Animations and not isHopping then
                 tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = P() })
             elseif frame.Visible then
                 frame.BorderColor3 = P()
@@ -762,7 +800,7 @@ local function attachScanline(frame)
     line.Parent = frame
     task.spawn(function()
         while guiAlive and frame.Parent do
-            if frame.Visible and config.Animations then
+            if frame.Visible and config.Animations and not isHopping then
                 line.BackgroundTransparency = 0.85
                 line.Position = UDim2.new(0, 0, 0, -2)
                 tween(line, TweenInfo.new(2.1, Enum.EasingStyle.Linear), {
@@ -783,6 +821,7 @@ end
 local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*", "!", "~" }
 
 local function scrambleText(original)
+    if #original < 1 then return original end
     local chars = {}
     for i = 1, #original do
         chars[i] = string.sub(original, i, i)
@@ -805,9 +844,9 @@ end
 local function attachTextGlitch(label)
     task.spawn(function()
         while guiAlive and label.Parent do
-            task.wait(RNG:NextNumber(3, 7))
+            task.wait(RNG:NextNumber(5, 10))
             if not (guiAlive and label.Parent) then break end
-            if config.Animations and label.Visible then
+            if config.Animations and label.Visible and not isHopping then
                 local original = label.Text
                 local frames = RNG:NextInteger(2, 5)
                 for i = 1, frames do
@@ -834,9 +873,9 @@ end
 local function attachGlitchShift(label)
     task.spawn(function()
         while guiAlive and label.Parent do
-            task.wait(RNG:NextNumber(5, 13))
+            task.wait(RNG:NextNumber(7, 15))
             if not (guiAlive and label.Parent) then break end
-            if config.Animations and label.Visible then
+            if config.Animations and label.Visible and not isHopping then
                 local base = label.Position
                 local steps = {
                     RNG:NextInteger(2, 6),
@@ -882,9 +921,9 @@ local function attachStaticOverlay(frame)
 
     task.spawn(function()
         while guiAlive and frame.Parent do
-            task.wait(RNG:NextNumber(5, 13))
+            task.wait(RNG:NextNumber(8, 16))
             if not (guiAlive and frame.Parent) then break end
-            if config.Animations and frame.Visible then
+            if config.Animations and frame.Visible and not isHopping then
                 local flashes = RNG:NextInteger(1, 3)
                 for _ = 1, flashes do
                     local lit = {}
@@ -1445,7 +1484,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.2
+> SERVER FINDER v2.3
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1493,14 +1532,17 @@ InfoTextLabel.Text = [[
    lifetime bars, staggered player cards, warp
    strobe + full-screen surge on teleport, error
    shake, match bounce and a CRT power-off close
-   animation. Press RightShift to hide/show the
-   interface. ANIMATIONS toggle disables it all.
+   animation. Ambient effects pause automatically
+   while a hop is running so the search never
+   fights the GUI for CPU. Press RightShift to
+   hide/show. ANIMATIONS toggle disables it all.
 
 10. THEMES
    Cycle the terminal accent colour live from
    Settings: TERMINAL GREEN, AMBER, CYAN,
-   MAGENTA and SNOW. Every window morphs between
-   themes with a smooth colour transition.
+   MAGENTA and SNOW. Every accent, label and
+   outline recolours instantly, with a smooth
+   fade layered on top when animations are on.
 
 11. HOP ONCE
    Jumps without changing the saved auto-loop setting.
@@ -2410,7 +2452,7 @@ local function getUnvisitedServer(token)
         if #candidates >= targetCount then break end
         if type(data.nextPageCursor) ~= "string" or data.nextPageCursor == "" then break end
         cursor = data.nextPageCursor
-        task.wait(0.08)
+        task.wait(0.02)
     end
 
     local chosen = pickServer(candidates)
