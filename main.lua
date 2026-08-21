@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 10
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.1"
+local VERSION = "2.2"
 
 local guiAlive = true
 local isHopping = false
@@ -398,6 +398,123 @@ local MUTED = Color3.fromRGB(120, 120, 120)
 local GREEN = Color3.fromRGB(140, 255, 170)
 local RED = Color3.fromRGB(255, 135, 135)
 
+-- ============================================================
+-- THEME PALETTE (v2.2)
+-- Every bright "ink" accent, dim hint and muted outline now reads
+-- from a live palette instead of a hard-coded colour. The whole
+-- terminal can therefore breathe in sync and morph between themes
+-- on the fly. WHITE/DIM/MUTED usages were re-routed to P()/D()/M().
+-- ============================================================
+local THEMES = {
+    ["TERMINAL GREEN"] = {
+        ink   = Color3.fromRGB(120, 255, 160),
+        dim   = Color3.fromRGB(150, 225, 180),
+        muted = Color3.fromRGB(70, 140, 95),
+    },
+    ["AMBER"] = {
+        ink   = Color3.fromRGB(255, 178, 80),
+        dim   = Color3.fromRGB(255, 214, 150),
+        muted = Color3.fromRGB(150, 104, 46),
+    },
+    ["CYAN"] = {
+        ink   = Color3.fromRGB(90, 220, 255),
+        dim   = Color3.fromRGB(150, 235, 255),
+        muted = Color3.fromRGB(55, 130, 160),
+    },
+    ["MAGENTA"] = {
+        ink   = Color3.fromRGB(255, 110, 235),
+        dim   = Color3.fromRGB(255, 180, 240),
+        muted = Color3.fromRGB(150, 64, 138),
+    },
+    ["SNOW"] = {
+        ink   = Color3.fromRGB(255, 255, 255),
+        dim   = Color3.fromRGB(180, 180, 180),
+        muted = Color3.fromRGB(120, 120, 120),
+    },
+}
+
+local currentTheme = "TERMINAL GREEN"
+local currentPalette = THEMES[currentTheme]
+
+-- Live ink colour — all bright accents read from here.
+local function P()
+    return currentPalette.ink
+end
+
+-- Live dim / muted colours for hints, secondary text and outlines.
+local function D()
+    return currentPalette.dim
+end
+
+local function M()
+    return currentPalette.muted
+end
+
+-- Smoothly morph every live accent on screen from one theme to the next.
+local function applyTheme(name)
+    local target = THEMES[name]
+    if not target or target == currentPalette then
+        return
+    end
+    local fromPalette = currentPalette
+    currentPalette = target
+    currentTheme = name
+
+    local function remap(color)
+        if color == fromPalette.ink then return target.ink end
+        if color == fromPalette.dim then return target.dim end
+        if color == fromPalette.muted then return target.muted end
+        return nil
+    end
+
+    -- Snapshot the colours currently on screen so interrupted tweens do
+    -- not leave half-morphed UI behind.
+    local snapshot = {}
+    for _, instance in ipairs(ScreenGui:GetDescendants()) do
+        if instance:IsA("GuiObject") then
+            local item = {
+                border = instance.BorderColor3,
+                background = instance.BackgroundColor3,
+            }
+            if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+                item.text = instance.TextColor3
+            end
+            if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+                item.image = instance.ImageColor3
+            end
+            snapshot[instance] = item
+        end
+    end
+
+    local duration = config.Animations and 0.4 or 0
+    for instance, item in pairs(snapshot) do
+        if instance.Parent then
+            local props = {}
+            local mapped = remap(item.text or nil)
+            if mapped then props.TextColor3 = mapped end
+            mapped = remap(item.image or nil)
+            if mapped then props.ImageColor3 = mapped end
+            mapped = remap(item.border)
+            if mapped then props.BorderColor3 = mapped end
+            mapped = remap(item.background)
+            if mapped then props.BackgroundColor3 = mapped end
+            if next(props) then
+                if duration > 0 then
+                    tween(instance, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+                else
+                    for key, value in pairs(props) do
+                        instance[key] = value
+                    end
+                end
+            end
+        end
+    end
+
+    if notify then
+        notify("Theme: " .. name, target.ink)
+    end
+end
+
 local activeTweens = setmetatable({}, { __mode = "k" })
 local function tween(instance, info, props)
     if not instance or not instance.Parent then
@@ -445,7 +562,7 @@ local function setupRetroButton(button)
     shine.Size = UDim2.new(0, 8, 1.8, 0)
     shine.Position = UDim2.new(-0.15, 0, 0.5, 0)
     shine.Rotation = 14
-    shine.BackgroundColor3 = WHITE
+    shine.BackgroundColor3 = P()
     shine.BackgroundTransparency = 1
     shine.BorderSizePixel = 0
     shine.ZIndex = button.ZIndex + 2
@@ -475,7 +592,7 @@ local function setupRetroButton(button)
         wave.AnchorPoint = Vector2.new(0.5, 0.5)
         wave.Position = UDim2.new(0.5, 0, 0.5, 0)
         wave.Size = UDim2.new(0, 6, 0, 6)
-        wave.BackgroundColor3 = bright > 0.5 and BLACK or WHITE
+        wave.BackgroundColor3 = bright > 0.5 and BLACK or P()
         wave.BackgroundTransparency = 0.55
         wave.BorderSizePixel = 0
         wave.ZIndex = button.ZIndex + 1
@@ -494,11 +611,11 @@ local function setupRetroButton(button)
         if not guiAlive or not button.Parent then
             return
         end
-        local props = { BackgroundColor3 = state and WHITE or BLACK }
+        local props = { BackgroundColor3 = state and P() or BLACK }
         if isImage then
-            props.ImageColor3 = state and BLACK or WHITE
+            props.ImageColor3 = state and BLACK or P()
         else
-            props.TextColor3 = state and BLACK or WHITE
+            props.TextColor3 = state and BLACK or P()
         end
         tween(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad), props)
     end
@@ -576,11 +693,19 @@ local function makeDraggable(frame, handle)
         dragStart = input.Position
         startPos = frame.Position
         raiseWindow(frame)
-        input.Changed:Connect(function()
+        -- Each drag used to leave a permanent input.Changed connection
+        -- behind, slowly leaking listeners over the session. The end
+        -- listener now disconnects itself once the input releases.
+        local endConnection
+        endConnection = input.Changed:Connect(function()
             if input.UserInputState == Enum.UserInputState.End then
                 dragging = false
                 dragInput = nil
                 clampToViewport(frame)
+                if endConnection then
+                    endConnection:Disconnect()
+                    endConnection = nil
+                end
             end
         end)
     end)
@@ -608,16 +733,16 @@ local function pulseBorder(frame)
     task.spawn(function()
         while guiAlive and frame.Parent do
             if frame.Visible and config.Animations then
-                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED })
+                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = M() })
             end
             task.wait(1.2)
             if not (guiAlive and frame.Parent) then
                 break
             end
             if frame.Visible and config.Animations then
-                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = WHITE })
+                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = P() })
             elseif frame.Visible then
-                frame.BorderColor3 = WHITE
+                frame.BorderColor3 = P()
             end
             task.wait(1.2)
         end
@@ -630,7 +755,7 @@ local function attachScanline(frame)
     line.Name = "Scanline"
     line.Size = UDim2.new(1, 0, 0, 1)
     line.Position = UDim2.new(0, 0, 0, -2)
-    line.BackgroundColor3 = WHITE
+    line.BackgroundColor3 = P()
     line.BackgroundTransparency = 1
     line.BorderSizePixel = 0
     line.ZIndex = 40
@@ -654,34 +779,137 @@ local function attachScanline(frame)
     return line
 end
 
--- Occasional 2-frame text corruption for that broken-terminal look.
-local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*" }
+-- Occasional multi-frame text corruption for that broken-terminal look.
+local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*", "!", "~" }
+
+local function scrambleText(original)
+    local chars = {}
+    for i = 1, #original do
+        chars[i] = string.sub(original, i, i)
+    end
+    local edits = math.max(1, math.min(#chars, 1 + math.floor(#original / 8)))
+    for _ = 1, edits do
+        chars[RNG:NextInteger(1, #chars)] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
+    end
+    -- Sometimes corrupt a whole run of characters at once.
+    if #chars >= 3 and RNG:NextNumber() < 0.4 then
+        local startIdx = RNG:NextInteger(1, #chars - 1)
+        local len = RNG:NextInteger(1, math.min(3, #chars - startIdx))
+        for i = startIdx, startIdx + len do
+            chars[i] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
+        end
+    end
+    return table.concat(chars)
+end
+
 local function attachTextGlitch(label)
     task.spawn(function()
         while guiAlive and label.Parent do
-            task.wait(RNG:NextNumber(4, 9))
+            task.wait(RNG:NextNumber(3, 7))
             if not (guiAlive and label.Parent) then break end
             if config.Animations and label.Visible then
                 local original = label.Text
-                for _ = 1, 2 do
+                local frames = RNG:NextInteger(2, 5)
+                for i = 1, frames do
                     if not label.Parent then return end
-                    local chars = {}
-                    for i = 1, #original do
-                        chars[i] = string.sub(original, i, i)
+                    label.Text = scrambleText(original)
+                    if i == 1 then
+                        -- Chromatic hue shift while corrupted.
+                        label.TextColor3 = RNG:NextNumber() < 0.5 and M() or P()
+                        label.Rotation = RNG:NextNumber(-1.6, 1.6)
                     end
-                    for _ = 1, RNG:NextInteger(1, 3) do
-                        local idx = RNG:NextInteger(1, #chars)
-                        chars[idx] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
-                    end
-                    label.Text = table.concat(chars)
-                    task.wait(0.05)
-                    label.Text = original
-                    task.wait(0.06)
+                    task.wait(RNG:NextNumber(0.03, 0.06))
                 end
-                label.Text = original
+                if label.Parent then
+                    label.Text = original
+                    label.TextColor3 = P()
+                    label.Rotation = 0
+                end
             end
         end
     end)
+end
+
+-- Periodic horizontal jitter: the label slides a few pixels and snaps back.
+local function attachGlitchShift(label)
+    task.spawn(function()
+        while guiAlive and label.Parent do
+            task.wait(RNG:NextNumber(5, 13))
+            if not (guiAlive and label.Parent) then break end
+            if config.Animations and label.Visible then
+                local base = label.Position
+                local steps = {
+                    RNG:NextInteger(2, 6),
+                    -RNG:NextInteger(2, 5),
+                    RNG:NextInteger(1, 3),
+                    0,
+                }
+                for _, dx in ipairs(steps) do
+                    if not label.Parent then return end
+                    tween(label, TweenInfo.new(0.03, Enum.EasingStyle.Quad), {
+                        Position = UDim2.new(base.X.Scale, base.X.Offset + dx, base.Y.Scale, base.Y.Offset),
+                    })
+                    task.wait(0.035)
+                end
+            end
+        end
+    end)
+end
+
+-- Random horizontal bands of static that flicker for a frame or two.
+local function attachStaticOverlay(frame)
+    local overlay = Instance.new("Frame")
+    overlay.Name = "StaticOverlay"
+    overlay.Size = UDim2.new(1, 0, 1, 0)
+    overlay.BackgroundTransparency = 1
+    overlay.BorderSizePixel = 0
+    overlay.ZIndex = 60
+    overlay.Parent = frame
+
+    local bands = {}
+    for i = 1, 7 do
+        local band = Instance.new("Frame")
+        band.Name = "StaticBand" .. tostring(i)
+        band.Size = UDim2.new(1, 0, 0, RNG:NextInteger(2, 6))
+        band.Position = UDim2.new(0, 0, RNG:NextNumber(0, 0.9), 0)
+        band.BackgroundColor3 = P()
+        band.BackgroundTransparency = 1
+        band.BorderSizePixel = 0
+        band.ZIndex = 61
+        band.Parent = overlay
+        bands[i] = band
+    end
+
+    task.spawn(function()
+        while guiAlive and frame.Parent do
+            task.wait(RNG:NextNumber(5, 13))
+            if not (guiAlive and frame.Parent) then break end
+            if config.Animations and frame.Visible then
+                local flashes = RNG:NextInteger(1, 3)
+                for _ = 1, flashes do
+                    local lit = {}
+                    for _, band in ipairs(bands) do
+                        band.BackgroundColor3 = P()
+                        if RNG:NextNumber() < 0.5 then
+                            band.BackgroundTransparency = RNG:NextNumber(0.25, 0.55)
+                            band.Position = UDim2.new(0, 0, RNG:NextNumber(0, 0.92), 0)
+                            table.insert(lit, band)
+                        else
+                            band.BackgroundTransparency = 1
+                        end
+                    end
+                    task.wait(RNG:NextNumber(0.04, 0.09))
+                    for _, band in ipairs(lit) do
+                        band.BackgroundTransparency = 1
+                    end
+                    if flashes > 1 then
+                        task.wait(RNG:NextNumber(0.03, 0.07))
+                    end
+                end
+            end
+        end
+    end)
+    return overlay
 end
 
 local function createWindow(opts)
@@ -691,7 +919,7 @@ local function createWindow(opts)
     win.Position = opts.Position
     win.BackgroundColor3 = BLACK
     win.BorderSizePixel = 1
-    win.BorderColor3 = WHITE
+    win.BorderColor3 = P()
     win.Active = true
     win.Visible = false
     win.ClipsDescendants = true
@@ -713,7 +941,7 @@ local function createWindow(opts)
     title.Size = UDim2.new(1, -36, 1, 0)
     title.Position = UDim2.new(0, 8, 0, 0)
     title.Text = opts.Title
-    title.TextColor3 = WHITE
+    title.TextColor3 = P()
     title.Font = Enum.Font.Code
     title.TextSize = 12
     title.TextXAlignment = Enum.TextXAlignment.Left
@@ -725,9 +953,9 @@ local function createWindow(opts)
     close.Position = UDim2.new(1, -25, 0, 5)
     close.BackgroundColor3 = BLACK
     close.BorderSizePixel = 1
-    close.BorderColor3 = WHITE
+    close.BorderColor3 = P()
     close.Text = "X"
-    close.TextColor3 = WHITE
+    close.TextColor3 = P()
     close.Font = Enum.Font.Code
     close.TextSize = 12
     close.AutoButtonColor = false
@@ -744,14 +972,16 @@ local function createWindow(opts)
     local line = Instance.new("Frame")
     line.Size = UDim2.new(1, 0, 0, 1)
     line.Position = UDim2.new(0, 0, 0, 0)
-    line.BackgroundColor3 = WHITE
+    line.BackgroundColor3 = P()
     line.BorderSizePixel = 0
     line.Parent = body
 
     makeDraggable(win, titleBar)
     pulseBorder(win)
     attachScanline(win)
+    attachStaticOverlay(win)
     attachTextGlitch(title)
+    attachGlitchShift(title)
 
     win.InputBegan:Connect(function()
         raiseWindow(win)
@@ -834,7 +1064,7 @@ Main.Size = EXPANDED_SIZE
 Main.Position = UDim2.new(0.5, -170, 0.5, -270)
 Main.BackgroundColor3 = BLACK
 Main.BorderSizePixel = 1
-Main.BorderColor3 = WHITE
+Main.BorderColor3 = P()
 Main.Active = true
 Main.ClipsDescendants = true
 Main.Parent = ScreenGui
@@ -863,6 +1093,7 @@ tween(MainScale, TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection
 })
 pulseBorder(Main)
 attachScanline(Main)
+attachStaticOverlay(Main)
 
 local TitleBar = Instance.new("Frame")
 TitleBar.Name = "TitleBar"
@@ -876,7 +1107,7 @@ local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(1, -118, 1, 0)
 Title.Position = UDim2.new(0, 8, 0, 0)
 Title.Text = "[ SERVER FINDER v" .. VERSION .. " ]"
-Title.TextColor3 = WHITE
+Title.TextColor3 = P()
 Title.Font = Enum.Font.Code
 Title.TextSize = 12
 Title.TextXAlignment = Enum.TextXAlignment.Left
@@ -899,9 +1130,11 @@ do
             end
             Title.Text = fullTitle
             attachTextGlitch(Title)
+            attachGlitchShift(Title)
         end)
     else
         attachTextGlitch(Title)
+        attachGlitchShift(Title)
     end
 end
 
@@ -911,9 +1144,9 @@ local function makeHeaderButton(text, xOffset)
     btn.Position = UDim2.new(1, xOffset, 0, 5)
     btn.BackgroundColor3 = BLACK
     btn.BorderSizePixel = 1
-    btn.BorderColor3 = WHITE
+    btn.BorderColor3 = P()
     btn.Text = text
-    btn.TextColor3 = WHITE
+    btn.TextColor3 = P()
     btn.Font = Enum.Font.Code
     btn.TextSize = 12
     btn.AutoButtonColor = false
@@ -928,9 +1161,9 @@ local function makeHeaderImageButton(imageId, xOffset)
     btn.Position = UDim2.new(1, xOffset, 0, 5)
     btn.BackgroundColor3 = BLACK
     btn.BorderSizePixel = 1
-    btn.BorderColor3 = WHITE
+    btn.BorderColor3 = P()
     btn.Image = "rbxassetid://" .. tostring(imageId)
-    btn.ImageColor3 = WHITE
+    btn.ImageColor3 = P()
     btn.ScaleType = Enum.ScaleType.Fit
     btn.AutoButtonColor = false
     btn.Parent = Main
@@ -970,7 +1203,7 @@ CloseBtn.MouseButton1Click:Connect(function()
     tween(Main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
         Size = UDim2.fromOffset(absSize.X, 2),
         Position = UDim2.fromOffset(absPos.X, centerY),
-        BackgroundColor3 = WHITE,
+        BackgroundColor3 = P(),
     })
     task.delay(0.17, function()
         if not Main.Parent then return end
@@ -1016,7 +1249,7 @@ end)
 local Line1 = Instance.new("Frame")
 Line1.Size = UDim2.new(1, 0, 0, 1)
 Line1.Position = UDim2.new(0, 0, 0, 0)
-Line1.BackgroundColor3 = WHITE
+Line1.BackgroundColor3 = P()
 Line1.BorderSizePixel = 0
 Line1.Parent = Body
 
@@ -1031,7 +1264,7 @@ end
 local function confirmBlink(instance)
     if not config.Animations or not instance or not instance.Parent then return end
     instance.BorderColor3 = GREEN
-    tween(instance, TweenInfo.new(0.45, Enum.EasingStyle.Quad), { BorderColor3 = WHITE })
+    tween(instance, TweenInfo.new(0.45, Enum.EasingStyle.Quad), { BorderColor3 = P() })
 end
 
 local function createToggle(parent, text, pos, size, key)
@@ -1040,10 +1273,10 @@ local function createToggle(parent, text, pos, size, key)
     btn.Position = pos
     btn.BackgroundColor3 = BLACK
     btn.BorderSizePixel = 1
-    btn.BorderColor3 = WHITE
+    btn.BorderColor3 = P()
     btn.Font = Enum.Font.Code
     btn.TextSize = 10
-    btn.TextColor3 = WHITE
+    btn.TextColor3 = P()
     btn.AutoButtonColor = false
     btn.Parent = parent
     setupRetroButton(btn)
@@ -1071,7 +1304,7 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
     frame.Position = pos
     frame.BackgroundColor3 = BLACK
     frame.BorderSizePixel = 1
-    frame.BorderColor3 = WHITE
+    frame.BorderColor3 = P()
     frame.Parent = parent
 
     local caption = Instance.new("TextLabel")
@@ -1080,7 +1313,7 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
     caption.BackgroundTransparency = 1
     caption.Font = Enum.Font.Code
     caption.TextSize = 10
-    caption.TextColor3 = WHITE
+    caption.TextColor3 = P()
     caption.TextXAlignment = Enum.TextXAlignment.Left
     caption.Parent = frame
 
@@ -1098,9 +1331,9 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
         btn.Position = UDim2.new(1, dx, 0.5, -9)
         btn.BackgroundColor3 = BLACK
         btn.BorderSizePixel = 1
-        btn.BorderColor3 = WHITE
+        btn.BorderColor3 = P()
         btn.Text = symbol
-        btn.TextColor3 = WHITE
+        btn.TextColor3 = P()
         btn.Font = Enum.Font.Code
         btn.TextSize = 11
         btn.AutoButtonColor = false
@@ -1136,10 +1369,10 @@ local function createSelector(parent, label, pos, size, key, values, labels)
     btn.Position = pos
     btn.BackgroundColor3 = BLACK
     btn.BorderSizePixel = 1
-    btn.BorderColor3 = WHITE
+    btn.BorderColor3 = P()
     btn.Font = Enum.Font.Code
     btn.TextSize = 10
-    btn.TextColor3 = WHITE
+    btn.TextColor3 = P()
     btn.AutoButtonColor = false
     btn.Parent = parent
     setupRetroButton(btn)
@@ -1169,7 +1402,7 @@ local function hint(parent, text, pos)
     label.BackgroundTransparency = 1
     label.Font = Enum.Font.Code
     label.TextSize = 9
-    label.TextColor3 = DIM
+    label.TextColor3 = D()
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Text = text
     label.Parent = parent
@@ -1193,9 +1426,9 @@ InfoScroll.Size = UDim2.new(1, -16, 1, -16)
 InfoScroll.Position = UDim2.new(0, 8, 0, 8)
 InfoScroll.BackgroundColor3 = BLACK
 InfoScroll.BorderSizePixel = 1
-InfoScroll.BorderColor3 = WHITE
+InfoScroll.BorderColor3 = P()
 InfoScroll.ScrollBarThickness = 4
-InfoScroll.ScrollBarImageColor3 = WHITE
+InfoScroll.ScrollBarImageColor3 = P()
 InfoScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 InfoScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 InfoScroll.Parent = InfoWin.Body
@@ -1212,7 +1445,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.1
+> SERVER FINDER v2.2
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1254,15 +1487,22 @@ InfoTextLabel.Text = [[
 
 9. GUI
    Fully animated retro-terminal interface: CRT
-   scanlines, typewriter title, glitch effects,
+   scanlines, random static bands, glitch shift,
+   typewriter title, multi-frame text corruption,
    button shine + ripple, sliding toasts with
    lifetime bars, staggered player cards, warp
-   strobe on teleport, error shake, match bounce
-   and a CRT power-off close animation.
-   Press RightShift to hide/show the interface.
-   ANIMATIONS toggle in Settings disables it all.
+   strobe + full-screen surge on teleport, error
+   shake, match bounce and a CRT power-off close
+   animation. Press RightShift to hide/show the
+   interface. ANIMATIONS toggle disables it all.
 
-10. HOP ONCE
+10. THEMES
+   Cycle the terminal accent colour live from
+   Settings: TERMINAL GREEN, AMBER, CYAN,
+   MAGENTA and SNOW. Every window morphs between
+   themes with a smooth colour transition.
+
+11. HOP ONCE
    Jumps without changing the saved auto-loop setting.
 
 Use [?] and the gear for Info / Settings.]]
@@ -1281,8 +1521,8 @@ SettingsScroll.Position = UDim2.new(0, 6, 0, 6)
 SettingsScroll.BackgroundTransparency = 1
 SettingsScroll.BorderSizePixel = 0
 SettingsScroll.ScrollBarThickness = 3
-SettingsScroll.ScrollBarImageColor3 = WHITE
-SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 558)
+SettingsScroll.ScrollBarImageColor3 = P()
+SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 600)
 SettingsScroll.Parent = SettingsWin.Body
 
 createToggle(SettingsScroll, "DONATORS", UDim2.new(0, 6, 0, 6), UDim2.new(1, -16, 0, 26), "FilterDonators")
@@ -1317,15 +1557,45 @@ hint(SettingsScroll, "minimum share among players with known country", UDim2.new
 createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 438), UDim2.new(1, -16, 0, 26), "Animations")
 hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 466))
 
+local THEME_ORDER = { "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA", "SNOW" }
+local ThemeSelectorBtn = Instance.new("TextButton")
+ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
+ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 490)
+ThemeSelectorBtn.BackgroundColor3 = BLACK
+ThemeSelectorBtn.BorderSizePixel = 1
+ThemeSelectorBtn.BorderColor3 = P()
+ThemeSelectorBtn.Font = Enum.Font.Code
+ThemeSelectorBtn.TextSize = 10
+ThemeSelectorBtn.TextColor3 = P()
+ThemeSelectorBtn.AutoButtonColor = false
+ThemeSelectorBtn.Parent = SettingsScroll
+setupRetroButton(ThemeSelectorBtn)
+
+local function refreshTheme()
+    if ThemeSelectorBtn.Parent then
+        ThemeSelectorBtn.Text = "THEME: <  " .. currentTheme .. "  >"
+    end
+end
+table.insert(settingRefreshers, refreshTheme)
+refreshTheme()
+
+ThemeSelectorBtn.MouseButton1Click:Connect(function()
+    local index = table.find(THEME_ORDER, currentTheme) or 1
+    applyTheme(THEME_ORDER[(index % #THEME_ORDER) + 1])
+    refreshTheme()
+    confirmBlink(ThemeSelectorBtn)
+end)
+hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 518))
+
 local ClearHistoryBtn = Instance.new("TextButton")
 ClearHistoryBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 494)
+ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 534)
 ClearHistoryBtn.BackgroundColor3 = BLACK
 ClearHistoryBtn.BorderSizePixel = 1
-ClearHistoryBtn.BorderColor3 = WHITE
+ClearHistoryBtn.BorderColor3 = P()
 ClearHistoryBtn.Font = Enum.Font.Code
 ClearHistoryBtn.TextSize = 10
-ClearHistoryBtn.TextColor3 = WHITE
+ClearHistoryBtn.TextColor3 = P()
 ClearHistoryBtn.Text = "[ CLEAR HISTORY ]"
 ClearHistoryBtn.AutoButtonColor = false
 ClearHistoryBtn.Parent = SettingsScroll
@@ -1333,13 +1603,13 @@ setupRetroButton(ClearHistoryBtn)
 
 local ResetSettingsBtn = Instance.new("TextButton")
 ResetSettingsBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 494)
+ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 534)
 ResetSettingsBtn.BackgroundColor3 = BLACK
 ResetSettingsBtn.BorderSizePixel = 1
-ResetSettingsBtn.BorderColor3 = WHITE
+ResetSettingsBtn.BorderColor3 = P()
 ResetSettingsBtn.Font = Enum.Font.Code
 ResetSettingsBtn.TextSize = 10
-ResetSettingsBtn.TextColor3 = WHITE
+ResetSettingsBtn.TextColor3 = P()
 ResetSettingsBtn.Text = "[ RESET ]"
 ResetSettingsBtn.AutoButtonColor = false
 ResetSettingsBtn.Parent = SettingsScroll
@@ -1361,6 +1631,8 @@ ResetSettingsBtn.MouseButton1Click:Connect(function()
     config.AutoHop = keepAutoHop
     saveSettings(config, true)
     refreshSettingControls()
+    applyTheme("TERMINAL GREEN")
+    refreshTheme()
     if updateBtnText then updateBtnText() end
     if notify then notify("Settings restored", GREEN) end
 end)
@@ -1403,7 +1675,7 @@ Stats.Position = UDim2.new(0, 8, 0, 8)
 Stats.BackgroundTransparency = 1
 Stats.Font = Enum.Font.Code
 Stats.TextSize = 10
-Stats.TextColor3 = DIM
+Stats.TextColor3 = D()
 Stats.TextXAlignment = Enum.TextXAlignment.Left
 Stats.TextTruncate = Enum.TextTruncate.AtEnd
 Stats.Text = ""
@@ -1414,9 +1686,9 @@ Scroll.Size = UDim2.new(1, -16, 1, -112)
 Scroll.Position = UDim2.new(0, 8, 0, 28)
 Scroll.BackgroundColor3 = BLACK
 Scroll.BorderSizePixel = 1
-Scroll.BorderColor3 = WHITE
+Scroll.BorderColor3 = P()
 Scroll.ScrollBarThickness = 4
-Scroll.ScrollBarImageColor3 = WHITE
+Scroll.ScrollBarImageColor3 = P()
 Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 Scroll.Parent = Body
@@ -1441,7 +1713,7 @@ ProgressTrack.Parent = Body
 
 local ProgressFill = Instance.new("Frame")
 ProgressFill.Size = UDim2.new(0, 0, 1, 0)
-ProgressFill.BackgroundColor3 = WHITE
+ProgressFill.BackgroundColor3 = P()
 ProgressFill.BorderSizePixel = 0
 ProgressFill.Parent = ProgressTrack
 
@@ -1449,7 +1721,7 @@ ProgressFill.Parent = ProgressTrack
 local ProgressGlow = Instance.new("Frame")
 ProgressGlow.Size = UDim2.new(0, 26, 1, 0)
 ProgressGlow.Position = UDim2.new(-0.12, 0, 0, 0)
-ProgressGlow.BackgroundColor3 = WHITE
+ProgressGlow.BackgroundColor3 = P()
 ProgressGlow.BackgroundTransparency = 1
 ProgressGlow.BorderSizePixel = 0
 ProgressGlow.ZIndex = 2
@@ -1476,7 +1748,7 @@ end)
 
 local function setProgress(value, color, instant)
     value = math.clamp(tonumber(value) or 0, 0, 1)
-    ProgressFill.BackgroundColor3 = color or WHITE
+    ProgressFill.BackgroundColor3 = color or P()
     local target = { Size = UDim2.new(value, 0, 1, 0) }
     if instant then
         local channels = activeTweens[ProgressFill]
@@ -1490,7 +1762,7 @@ local function setProgress(value, color, instant)
     end
     -- Completion pulse: the whole track blinks once in the result colour.
     if value >= 1 and config.Animations then
-        local blink = color or WHITE
+        local blink = color or P()
         ProgressTrack.BackgroundColor3 = blink
         tween(ProgressTrack, TweenInfo.new(0.45, Enum.EasingStyle.Quad), {
             BackgroundColor3 = Color3.fromRGB(35, 35, 35),
@@ -1504,7 +1776,7 @@ Status.Position = UDim2.new(0, 8, 1, -70)
 Status.BackgroundTransparency = 1
 Status.Font = Enum.Font.Code
 Status.TextSize = 10
-Status.TextColor3 = DIM
+Status.TextColor3 = D()
 Status.TextXAlignment = Enum.TextXAlignment.Left
 Status.TextTruncate = Enum.TextTruncate.AtEnd
 Status.Text = "> idle"
@@ -1515,10 +1787,10 @@ HopOnceBtn.Size = UDim2.new(0.46, 0, 0, 32)
 HopOnceBtn.Position = UDim2.new(0, 8, 1, -48)
 HopOnceBtn.BackgroundColor3 = BLACK
 HopOnceBtn.BorderSizePixel = 1
-HopOnceBtn.BorderColor3 = WHITE
+HopOnceBtn.BorderColor3 = P()
 HopOnceBtn.Font = Enum.Font.Code
 HopOnceBtn.TextSize = 10
-HopOnceBtn.TextColor3 = WHITE
+HopOnceBtn.TextColor3 = P()
 HopOnceBtn.Text = "[ HOP ONCE ]"
 HopOnceBtn.AutoButtonColor = false
 HopOnceBtn.Parent = Body
@@ -1529,10 +1801,10 @@ SearchBtn.Size = UDim2.new(0.46, -8, 0, 32)
 SearchBtn.Position = UDim2.new(0.52, 0, 1, -48)
 SearchBtn.BackgroundColor3 = BLACK
 SearchBtn.BorderSizePixel = 1
-SearchBtn.BorderColor3 = WHITE
+SearchBtn.BorderColor3 = P()
 SearchBtn.Font = Enum.Font.Code
 SearchBtn.TextSize = 10
-SearchBtn.TextColor3 = WHITE
+SearchBtn.TextColor3 = P()
 SearchBtn.AutoButtonColor = false
 SearchBtn.Parent = Body
 setupRetroButton(SearchBtn)
@@ -1566,7 +1838,7 @@ notify = function(message, color)
         table.remove(existing, 1)
     end
     toastCounter = toastCounter + 1
-    local accent = color or WHITE
+    local accent = color or P()
 
     -- Transparent holder keeps its place in the list while the label slides.
     local holder = Instance.new("Frame")
@@ -1651,8 +1923,8 @@ setStatus = function(text)
             Status.Text = newText
             -- Quick flash so status changes catch the eye.
             if config.Animations then
-                Status.TextColor3 = WHITE
-                tween(Status, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { TextColor3 = DIM })
+                Status.TextColor3 = P()
+                tween(Status, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { TextColor3 = D() })
             end
         end
     end
@@ -1795,7 +2067,7 @@ local function buildCard(pl)
     card.BackgroundColor3 = BLACK
     card.BackgroundTransparency = config.Animations and 1 or 0
     card.BorderSizePixel = 1
-    card.BorderColor3 = config.Animations and MUTED or WHITE
+    card.BorderColor3 = config.Animations and M() or P()
     card.ClipsDescendants = true
     card.Parent = Scroll
 
@@ -1808,7 +2080,7 @@ local function buildCard(pl)
     avatar.Position = UDim2.new(0, 4, 0.5, -13)
     avatar.BackgroundColor3 = BLACK
     avatar.BorderSizePixel = 1
-    avatar.BorderColor3 = WHITE
+    avatar.BorderColor3 = P()
     avatar.ImageTransparency = config.Animations and 1 or 0
     avatar.Parent = card
 
@@ -1816,7 +2088,7 @@ local function buildCard(pl)
     info.Size = UDim2.new(1, -38, 1, 0)
     info.Position = UDim2.new(0, 36, 0, 0)
     info.Text = playerLine(pl)
-    info.TextColor3 = WHITE
+    info.TextColor3 = P()
     info.Font = Enum.Font.Code
     info.TextSize = 10
     info.TextXAlignment = Enum.TextXAlignment.Left
@@ -1836,7 +2108,7 @@ local function buildCard(pl)
         if not card.Parent then return end
         tween(card, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
             BackgroundTransparency = 0,
-            BorderColor3 = WHITE,
+            BorderColor3 = P(),
         })
         tween(cardScale, TweenInfo.new(0.28, Enum.EasingStyle.Back), { Scale = 1 })
         tween(info, TweenInfo.new(0.24, Enum.EasingStyle.Quad), { TextTransparency = 0 })
@@ -2089,7 +2361,7 @@ local function getUnvisitedServer(token)
     for page = 1, MAX_API_PAGES do
         if not hopStillActive(token) then return nil, "stopped" end
         setStatus(string.format("scanning API page %d/%d (%d candidates)", page, MAX_API_PAGES, #candidates))
-        setProgress((page - 1) / MAX_API_PAGES, WHITE)
+        setProgress((page - 1) / MAX_API_PAGES, P())
 
         local cursorPart = ""
         if cursor ~= "" then
@@ -2177,8 +2449,8 @@ local function flashMatch()
             tween(Main, TweenInfo.new(0.12), { BorderColor3 = GREEN })
             tween(Title, TweenInfo.new(0.12), { TextColor3 = GREEN })
             task.wait(0.14)
-            tween(Main, TweenInfo.new(0.12), { BorderColor3 = WHITE })
-            tween(Title, TweenInfo.new(0.12), { TextColor3 = WHITE })
+            tween(Main, TweenInfo.new(0.12), { BorderColor3 = P() })
+            tween(Title, TweenInfo.new(0.12), { TextColor3 = P() })
             task.wait(0.14)
         end
     end)
@@ -2199,6 +2471,34 @@ local function shakeMain()
         end
         if guiAlive and Main.Parent then
             tween(Main, TweenInfo.new(0.05), { Position = origin })
+        end
+    end)
+end
+
+-- Full-screen pulse fired right before a teleport is issued, so the
+-- hop reads as a brief "warp" surge rather than an instant cut.
+local function warpFlash()
+    if not config.Animations then return end
+    task.spawn(function()
+        local flash = Instance.new("Frame")
+        flash.Name = "WarpFlash"
+        flash.Size = UDim2.new(1, 0, 1, 0)
+        flash.BackgroundColor3 = P()
+        flash.BackgroundTransparency = 1
+        flash.BorderSizePixel = 0
+        flash.ZIndex = 500
+        flash.Parent = ScreenGui
+        tween(flash, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            BackgroundTransparency = 0.5,
+        })
+        task.wait(0.16)
+        if flash.Parent then
+            tween(flash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                BackgroundTransparency = 1,
+            })
+            task.delay(0.42, function()
+                if flash.Parent then flash:Destroy() end
+            end)
         end
     end)
 end
@@ -2260,7 +2560,7 @@ executeHop = function()
     hopToken = hopToken + 1
     local token = hopToken
     pendingServerId = nil
-    setProgress(0, WHITE, true)
+    setProgress(0, P(), true)
     startSearchSpinner(token)
     setStatus("searching public servers")
 
@@ -2310,11 +2610,13 @@ executeHop = function()
                 if not (guiAlive and Main.Parent) then return end
                 tween(Main, TweenInfo.new(d, Enum.EasingStyle.Quad), { BorderColor3 = GREEN })
                 task.wait(d)
-                tween(Main, TweenInfo.new(d, Enum.EasingStyle.Quad), { BorderColor3 = WHITE })
+                tween(Main, TweenInfo.new(d, Enum.EasingStyle.Quad), { BorderColor3 = P() })
                 task.wait(d)
             end
         end)
     end
+
+    warpFlash()
 
     local ok, teleportError = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
@@ -2383,7 +2685,7 @@ local function evaluateServer()
     russianChatCount = 0
     table.clear(uniqueChatters)
     local seconds = config.AnalyzeSeconds
-    setProgress(0, WHITE, true)
+    setProgress(0, P(), true)
     for elapsed = 0, seconds - 1 do
         if not guiAlive or not config.AutoHop or token ~= evaluateToken or isHopping then
             if guiAlive then updateBtnText() end
@@ -2392,7 +2694,7 @@ local function evaluateServer()
         local remaining = seconds - elapsed
         SearchBtn.Text = string.format("[ ANALYZING (%ds)... ]", remaining)
         setStatus(string.format("listening chat / scanning players (%ds)", remaining))
-        setProgress(elapsed / seconds, WHITE)
+        setProgress(elapsed / seconds, P())
         task.wait(1)
     end
 
@@ -2473,7 +2775,7 @@ SearchBtn.MouseButton1Click:Connect(function()
     else
         evaluateToken = evaluateToken + 1
         setStatus(isHopping and "auto-loop stopped; current hop continues" or "auto-loop stopped")
-        setProgress(0, WHITE)
+        setProgress(0, P())
     end
 end)
 
