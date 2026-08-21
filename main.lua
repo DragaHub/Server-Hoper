@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 10
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.3"
+local VERSION = "2.4"
 
 local guiAlive = true
 local isHopping = false
@@ -191,6 +191,7 @@ local defaultSettings = {
     PeopleRegion = "ANY",
     MinRegionPercent = 35,
     Animations = true,
+    Theme = "SNOW",
 }
 
 local VALID_REGIONS = {
@@ -202,6 +203,13 @@ local VALID_SELECTION_MODES = {
     FULL = true,
     ["LOW PING"] = true,
     RANDOM = true,
+}
+local VALID_THEMES = {
+    SNOW = true,
+    ["TERMINAL GREEN"] = true,
+    AMBER = true,
+    CYAN = true,
+    MAGENTA = true,
 }
 
 local function copyDefaults()
@@ -234,6 +242,9 @@ local function normalizeSettings(cfg)
     end
     if type(cfg.SelectionMode) ~= "string" or not VALID_SELECTION_MODES[cfg.SelectionMode] then
         cfg.SelectionMode = defaultSettings.SelectionMode
+    end
+    if type(cfg.Theme) ~= "string" or not VALID_THEMES[cfg.Theme] then
+        cfg.Theme = defaultSettings.Theme
     end
     return cfg
 end
@@ -405,151 +416,92 @@ local RED = Color3.fromRGB(255, 135, 135)
 -- terminal can therefore breathe in sync and morph between themes
 -- on the fly. WHITE/DIM/MUTED usages were re-routed to P()/D()/M().
 -- ============================================================
+-- ============================================================
+-- THEME PALETTE (v2.4)
+-- A theme is a single "ink" accent colour used for the main text,
+-- titles, outlines and separators. Secondary hints (DIM) and muted
+-- outlines (MUTED) stay neutral grey so the interface keeps its
+-- classic terminal look. The chosen theme is persisted in settings,
+-- so it survives server hops and re-loads. Default is SNOW (white),
+-- the original appearance.
+-- ============================================================
 local THEMES = {
-    ["TERMINAL GREEN"] = {
-        ink   = Color3.fromRGB(120, 255, 160),
-        dim   = Color3.fromRGB(150, 225, 180),
-        muted = Color3.fromRGB(70, 140, 95),
-    },
-    ["AMBER"] = {
-        ink   = Color3.fromRGB(255, 178, 80),
-        dim   = Color3.fromRGB(255, 214, 150),
-        muted = Color3.fromRGB(150, 104, 46),
-    },
-    ["CYAN"] = {
-        ink   = Color3.fromRGB(90, 220, 255),
-        dim   = Color3.fromRGB(150, 235, 255),
-        muted = Color3.fromRGB(55, 130, 160),
-    },
-    ["MAGENTA"] = {
-        ink   = Color3.fromRGB(255, 110, 235),
-        dim   = Color3.fromRGB(255, 180, 240),
-        muted = Color3.fromRGB(150, 64, 138),
-    },
-    ["SNOW"] = {
-        ink   = Color3.fromRGB(255, 255, 255),
-        dim   = Color3.fromRGB(180, 180, 180),
-        muted = Color3.fromRGB(120, 120, 120),
-    },
+    ["SNOW"] = Color3.fromRGB(255, 255, 255),
+    ["TERMINAL GREEN"] = Color3.fromRGB(120, 255, 160),
+    ["AMBER"] = Color3.fromRGB(255, 178, 80),
+    ["CYAN"] = Color3.fromRGB(90, 220, 255),
+    ["MAGENTA"] = Color3.fromRGB(255, 110, 235),
 }
 
-local currentTheme = "TERMINAL GREEN"
-local currentPalette = THEMES[currentTheme]
+local currentTheme = (THEMES[config.Theme] and config.Theme) or "SNOW"
+local currentInk = THEMES[currentTheme]
 
--- Live ink colour -- all bright accents read from here.
+-- Live accent colour; all bright text/outlines read from here.
 local function P()
-    return currentPalette.ink
+    return currentInk
 end
 
--- Live dim / muted colours for hints, secondary text and outlines.
+-- Neutral secondary colours, independent of the chosen theme.
 local function D()
-    return currentPalette.dim
+    return DIM
 end
 
 local function M()
-    return currentPalette.muted
+    return MUTED
 end
 
--- Numeric colour comparison. Some executors implement Color3 == by
--- identity instead of by component value, so comparing .R/.G/.B as
--- plain numbers is the only reliable way to match colours.
-local function colorDistanceSq(a, b)
-    local dr = a.R - b.R
-    local dg = a.G - b.G
-    local db = a.B - b.B
-    return dr * dr + dg * dg + db * db
+-- Numeric colour comparison: robust even on executors where Color3 ==
+-- compares by identity rather than by component value.
+local function sameColor(a, b)
+    return math.abs(a.R - b.R) < 0.01
+        and math.abs(a.G - b.G) < 0.01
+        and math.abs(a.B - b.B) < 0.01
 end
 
--- Decide which palette role (ink/dim/muted) a colour belongs to by
--- matching it against every theme. Robust to copied Colour3 values and
--- to executors with broken colour equality.
-local function classifyRole(color)
-    local bestRole, bestDist = nil, 2000
-    for _, theme in pairs(THEMES) do
-        for role, col in pairs(theme) do
-            local dist = colorDistanceSq(color, col)
-            if dist < bestDist then
-                bestRole, bestDist = role, dist
-            end
-        end
-    end
-    return bestDist <= 64 and bestRole or nil
-end
-
--- Recolour every accent currently on screen. Colours are applied
--- directly (guaranteed to work), with an optional short tween played
--- over the top so the change still reads as a smooth morph. A delayed
--- safety net forces the final colour in case the executor's tween
--- never actually animates.
-local function applyTheme(name)
-    local target = THEMES[name]
-    if not target or target == currentPalette then
+-- Instantly recolour every element that uses the previous accent.
+-- Direct assignment makes the switch reliable and cheap (no tween
+-- dependency, no half-morphed frames).
+local function applyTheme(name, persist)
+    local ink = THEMES[name]
+    if not ink then
         return
     end
-    currentPalette = target
+    if sameColor(ink, currentInk) then
+        currentTheme = name
+        currentInk = ink
+        return
+    end
+    local from = currentInk
+    currentInk = ink
     currentTheme = name
-
-    local assignments = {}
-    local okScan = pcall(function()
+    if persist ~= false then
+        config.Theme = name
+        saveSettings(config, true)
+    end
+    pcall(function()
         for _, instance in ipairs(ScreenGui:GetDescendants()) do
             if instance:IsA("GuiObject") then
-                local role = classifyRole(instance.BorderColor3)
-                if role then
-                    table.insert(assignments, { instance = instance, prop = "BorderColor3", to = target[role] })
+                if sameColor(instance.BorderColor3, from) then
+                    instance.BorderColor3 = ink
                 end
-                -- Backgrounds that are palette colours (separator lines,
-                -- progress fill/glow, shine) must follow the theme too.
-                role = classifyRole(instance.BackgroundColor3)
-                if role then
-                    table.insert(assignments, { instance = instance, prop = "BackgroundColor3", to = target[role] })
+                if sameColor(instance.BackgroundColor3, from) then
+                    instance.BackgroundColor3 = ink
                 end
                 if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-                    role = classifyRole(instance.TextColor3)
-                    if role then
-                        table.insert(assignments, { instance = instance, prop = "TextColor3", to = target[role] })
+                    if sameColor(instance.TextColor3, from) then
+                        instance.TextColor3 = ink
                     end
                 end
                 if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-                    role = classifyRole(instance.ImageColor3)
-                    if role then
-                        table.insert(assignments, { instance = instance, prop = "ImageColor3", to = target[role] })
+                    if sameColor(instance.ImageColor3, from) then
+                        instance.ImageColor3 = ink
                     end
                 end
             end
         end
     end)
-    if not okScan then
-        assignments = {}
-    end
-
-    local animated = config.Animations
-    for _, assignment in ipairs(assignments) do
-        local instance = assignment.instance
-        if instance and instance.Parent then
-            local ok, anim
-            if animated then
-                ok, anim = pcall(function()
-                    return tween(instance, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-                        [assignment.prop] = assignment.to,
-                    })
-                end)
-            end
-            if ok and anim then
-                -- Force the final colour once the tween window closes.
-                task.delay(0.35, function()
-                    if instance and instance.Parent then
-                        instance[assignment.prop] = assignment.to
-                    end
-                end)
-            else
-                -- Direct fallback: recolour even if TweenService misbehaves.
-                instance[assignment.prop] = assignment.to
-            end
-        end
-    end
-
     if notify then
-        notify("Theme: " .. name, target.ink)
+        notify("Theme: " .. name, ink)
     end
 end
 
@@ -1484,7 +1436,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.3
+> SERVER FINDER v2.4
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1538,13 +1490,20 @@ InfoTextLabel.Text = [[
    hide/show. ANIMATIONS toggle disables it all.
 
 10. THEMES
-   Cycle the terminal accent colour live from
-   Settings: TERMINAL GREEN, AMBER, CYAN,
-   MAGENTA and SNOW. Every accent, label and
-   outline recolours instantly, with a smooth
-   fade layered on top when animations are on.
+   Cycle the terminal accent from Settings:
+   SNOW (default, classic white), TERMINAL
+   GREEN, AMBER, CYAN and MAGENTA. Only the
+   main accent changes; hints stay neutral.
+   The choice is saved and survives server hops.
 
-11. HOP ONCE
+11. AUTO-LOOP STOP RULES
+   The loop stops only when every ACTIVE filter
+   is satisfied and at least one stop signal is
+   enabled (premium, chat or region). With all
+   of those off it keeps hopping for the minimum
+   player count until you press STOP.
+
+12. HOP ONCE
    Jumps without changing the saved auto-loop setting.
 
 Use [?] and the gear for Info / Settings.]]
@@ -1599,7 +1558,7 @@ hint(SettingsScroll, "minimum share among players with known country", UDim2.new
 createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 438), UDim2.new(1, -16, 0, 26), "Animations")
 hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 466))
 
-local THEME_ORDER = { "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA", "SNOW" }
+local THEME_ORDER = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA" }
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
 ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 490)
@@ -1673,7 +1632,7 @@ ResetSettingsBtn.MouseButton1Click:Connect(function()
     config.AutoHop = keepAutoHop
     saveSettings(config, true)
     refreshSettingControls()
-    applyTheme("TERMINAL GREEN")
+    applyTheme("SNOW", false)
     refreshTheme()
     if updateBtnText then updateBtnText() end
     if notify then notify("Settings restored", GREEN) end
@@ -2764,13 +2723,25 @@ local function evaluateServer()
         or (regionKnown > 0 and regionMatched > 0 and regionPercent >= config.MinRegionPercent)
         or (config.PeopleRegion == "RUSSIAN" and russianChatCount > 0)
 
-    if passDonators and passChat and passPlayers and passRegion then
+    -- A stop-worthy match must satisfy every active criterion AND carry
+    -- at least one real stop signal (premium, chat or region). If all of
+    -- those are disabled the loop would otherwise "match" every server
+    -- with zero evidence and stop instantly -- so instead it keeps
+    -- hopping until the user presses STOP.
+    local hasStopSignal = config.FilterDonators or config.FilterChat or config.PeopleRegion ~= "ANY"
+
+    if passDonators and passChat and passPlayers and passRegion and hasStopSignal then
         SearchBtn.Text = "[ MATCH FOUND ]"
         setProgress(1, GREEN)
+        local regionText = config.PeopleRegion == "ANY"
+            and "ANY"
+            or string.format("%d/%d (%d%%)", regionMatched, regionKnown, regionPercent)
         setStatus(string.format(
-            "match prem=%d chat=%d/%d ru=%d region=%d/%d (%d%%)",
-            donatorCount, chatMessageCount, chatterCount, russianChatCount,
-            regionMatched, regionKnown, regionPercent
+            "match prem=%s chat=%s ru=%d region=%s",
+            config.FilterDonators and tostring(donatorCount) or "-",
+            config.FilterChat and string.format("%d/%d", chatMessageCount, chatterCount) or "-",
+            russianChatCount,
+            regionText
         ))
         config.AutoHop = false
         saveSettings(config, true)
@@ -2783,10 +2754,14 @@ local function evaluateServer()
     end
 
     local reasons = {}
-    if not passDonators then table.insert(reasons, "no premium") end
-    if not passChat then table.insert(reasons, "silent chat") end
-    if not passPlayers then table.insert(reasons, "few players") end
-    if not passRegion then table.insert(reasons, "wrong region " .. tostring(regionPercent) .. "%") end
+    if not hasStopSignal then
+        table.insert(reasons, "no stop filters (only min players)")
+    else
+        if not passDonators then table.insert(reasons, "no premium") end
+        if not passChat then table.insert(reasons, "silent chat") end
+        if not passPlayers then table.insert(reasons, "few players") end
+        if not passRegion then table.insert(reasons, "wrong region " .. tostring(regionPercent) .. "%") end
+    end
     local why = table.concat(reasons, ", ")
     SearchBtn.Text = "[ NEXT SERVER ]"
     setProgress(1, RED)
