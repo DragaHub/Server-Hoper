@@ -12,7 +12,7 @@ if not Players.LocalPlayer then
 end
 local LocalPlayer = Players.LocalPlayer
 
-local RAW_URL = "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"
+-- Mirror URLs for self-restart after teleport (setQueue below).
 local SETTINGS_FILE = "ServerFinderConfig.json"
 local VISITED_FILE = "ServerFinderVisited.json"
 local MAX_VISITED = 200
@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.5"
+local VERSION = "2.6"
 
 local guiAlive = true
 local isHopping = false
@@ -64,6 +64,12 @@ local function setQueue()
         or (type(fluxus) == "table" and fluxus.queue_on_teleport)
         or (env and env.queue_on_teleport)
     if type(q) ~= "function" then return false end
+    local mirrorList = table.concat({
+        string.format("%q", "https://cdn.jsdelivr.net/gh/DragaHub/Server-Hoper@main/main.lua"),
+        string.format("%q", "https://raw.githack.com/DragaHub/Server-Hoper/main/main.lua"),
+        string.format("%q", "https://github.com/DragaHub/Server-Hoper/raw/main/main.lua"),
+        string.format("%q", "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"),
+    }, ", ")
     local ok = pcall(function()
         q(string.format([[
             repeat task.wait() until game:IsLoaded()
@@ -71,8 +77,17 @@ local function setQueue()
             if not lp then
                 game:GetService("Players"):GetPropertyChangedSignal("LocalPlayer"):Wait()
             end
-            loadstring(game:HttpGet("%s"))()
-        ]], RAW_URL))
+            local urls = { %s }
+            local src = nil
+            for _, u in ipairs(urls) do
+                local ok2, body = pcall(function() return game:HttpGet(u) end)
+                if ok2 and type(body) == "string" and body ~= "" then
+                    src = body
+                    break
+                end
+            end
+            if src then loadstring(src)() end
+        ]], mirrorList))
     end)
     return ok
 end
@@ -167,8 +182,6 @@ saveVisited(visitedServers)
 -- cooldown. Without this, a rolled-back server is instantly re-selected,
 -- fails again, and the hopper looks permanently stuck on a full server.
 local failedServers = {}
-local FAILED_RETRY_COOLDOWN = 90
-local lastHopStart = 0
 
 local function forgetOldestVisited(keep)
     visitedServers = pruneVisited(visitedServers, keep)
@@ -187,6 +200,16 @@ local function countVisited()
 end
 
 -- Settings are whitelisted and normalized so a damaged JSON file cannot break the UI.
+-- Theme palette table. Defined before loadSettings so normalizeSettings
+-- can validate the persisted theme name against it.
+local THEMES = {
+    ["SNOW"] = Color3.fromRGB(255, 255, 255),
+    ["TERMINAL GREEN"] = Color3.fromRGB(120, 255, 160),
+    ["AMBER"] = Color3.fromRGB(255, 178, 80),
+    ["CYAN"] = Color3.fromRGB(90, 220, 255),
+    ["MAGENTA"] = Color3.fromRGB(255, 110, 235),
+}
+
 local defaultSettings = {
     AutoHop = false,
     FilterDonators = true,
@@ -212,14 +235,6 @@ local VALID_SELECTION_MODES = {
     ["LOW PING"] = true,
     RANDOM = true,
 }
-local VALID_THEMES = {
-    SNOW = true,
-    ["TERMINAL GREEN"] = true,
-    AMBER = true,
-    CYAN = true,
-    MAGENTA = true,
-}
-
 local function copyDefaults()
     local result = {}
     for key, value in pairs(defaultSettings) do
@@ -251,7 +266,7 @@ local function normalizeSettings(cfg)
     if type(cfg.SelectionMode) ~= "string" or not VALID_SELECTION_MODES[cfg.SelectionMode] then
         cfg.SelectionMode = defaultSettings.SelectionMode
     end
-    if type(cfg.Theme) ~= "string" or not VALID_THEMES[cfg.Theme] then
+    if type(cfg.Theme) ~= "string" or THEMES[cfg.Theme] == nil then
         cfg.Theme = defaultSettings.Theme
     end
     return cfg
@@ -304,11 +319,6 @@ local config = loadSettings()
 
 -- Roblox does not publish the physical datacenter region in the public server list.
 -- Instead, this filter evaluates the countries/language of players after joining.
-local REGION_ORDER = { "ANY", "RUSSIAN", "CIS", "EUROPE", "N.AMERICA", "S.AMERICA", "ASIA", "OCEANIA" }
-local REGION_LABELS = {
-    ANY = "ANY", RUSSIAN = "RUSSIAN", CIS = "RU / CIS", EUROPE = "EUROPE",
-    ["N.AMERICA"] = "N. AMERICA", ["S.AMERICA"] = "S. AMERICA", ASIA = "ASIA", OCEANIA = "OCEANIA",
-}
 local REGION_COUNTRIES = {
     RUSSIAN = { RU=true, BY=true, KZ=true, KG=true },
     CIS = { RU=true, BY=true, KZ=true, KG=true, AM=true, AZ=true, MD=true, TJ=true, TM=true, UZ=true, UA=true },
@@ -366,11 +376,15 @@ local function lookupCountry(pl)
     return nil
 end
 
-local oldCoreGui = CoreGui:FindFirstChild("ClassicServerFinder")
-if oldCoreGui then pcall(function() oldCoreGui:Destroy() end) end
-local existingPlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
-local oldPlayerGui = existingPlayerGui and existingPlayerGui:FindFirstChild("ClassicServerFinder")
-if oldPlayerGui then pcall(function() oldPlayerGui:Destroy() end) end
+pcall(function()
+    local g = CoreGui:FindFirstChild("ClassicServerFinder")
+    if g then g:Destroy() end
+end)
+pcall(function()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local g = pg and pg:FindFirstChild("ClassicServerFinder")
+    if g then g:Destroy() end
+end)
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "ClassicServerFinder"
@@ -418,44 +432,18 @@ local GREEN = Color3.fromRGB(140, 255, 170)
 local RED = Color3.fromRGB(255, 135, 135)
 
 -- ============================================================
--- THEME PALETTE (v2.2)
--- Every bright "ink" accent, dim hint and muted outline now reads
--- from a live palette instead of a hard-coded colour. The whole
--- terminal can therefore breathe in sync and morph between themes
--- on the fly. WHITE/DIM/MUTED usages were re-routed to P()/D()/M().
--- ============================================================
--- ============================================================
 -- THEME PALETTE (v2.4)
 -- A theme is a single "ink" accent colour used for the main text,
 -- titles, outlines and separators. Secondary hints (DIM) and muted
--- outlines (MUTED) stay neutral grey so the interface keeps its
--- classic terminal look. The chosen theme is persisted in settings,
--- so it survives server hops and re-loads. Default is SNOW (white),
--- the original appearance.
+-- outlines (MUTED) stay neutral grey. The chosen theme is persisted
+-- in settings and survives server hops. Default is SNOW (white).
+-- The THEMES table itself is defined earlier (before loadSettings).
 -- ============================================================
-local THEMES = {
-    ["SNOW"] = Color3.fromRGB(255, 255, 255),
-    ["TERMINAL GREEN"] = Color3.fromRGB(120, 255, 160),
-    ["AMBER"] = Color3.fromRGB(255, 178, 80),
-    ["CYAN"] = Color3.fromRGB(90, 220, 255),
-    ["MAGENTA"] = Color3.fromRGB(255, 110, 235),
-}
-
 local currentTheme = (THEMES[config.Theme] and config.Theme) or "SNOW"
-local currentInk = THEMES[currentTheme]
 
 -- Live accent colour; all bright text/outlines read from here.
 local function P()
-    return currentInk
-end
-
--- Neutral secondary colours, independent of the chosen theme.
-local function D()
-    return DIM
-end
-
-local function M()
-    return MUTED
+    return THEMES[currentTheme]
 end
 
 -- Numeric colour comparison: robust even on executors where Color3 ==
@@ -474,13 +462,11 @@ local function applyTheme(name, persist)
     if not ink then
         return
     end
-    if sameColor(ink, currentInk) then
+    local from = THEMES[currentTheme]
+    if sameColor(ink, from) then
         currentTheme = name
-        currentInk = ink
         return
     end
-    local from = currentInk
-    currentInk = ink
     currentTheme = name
     if persist ~= false then
         config.Theme = name
@@ -731,7 +717,7 @@ local function pulseBorder(frame)
     task.spawn(function()
         while guiAlive and frame.Parent do
             if frame.Visible and config.Animations and not isHopping then
-                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = M() })
+                tween(frame, TweenInfo.new(1.2, Enum.EasingStyle.Sine), { BorderColor3 = MUTED })
             end
             task.wait(1.2)
             if not (guiAlive and frame.Parent) then
@@ -778,30 +764,27 @@ local function attachScanline(frame)
 end
 
 -- Occasional multi-frame text corruption for that broken-terminal look.
-local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*", "!", "~" }
-
-local function scrambleText(original)
-    if #original < 1 then return original end
-    local chars = {}
-    for i = 1, #original do
-        chars[i] = string.sub(original, i, i)
-    end
-    local edits = math.max(1, math.min(#chars, 1 + math.floor(#original / 8)))
-    for _ = 1, edits do
-        chars[RNG:NextInteger(1, #chars)] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
-    end
-    -- Sometimes corrupt a whole run of characters at once.
-    if #chars >= 3 and RNG:NextNumber() < 0.4 then
-        local startIdx = RNG:NextInteger(1, #chars - 1)
-        local len = RNG:NextInteger(1, math.min(3, #chars - startIdx))
-        for i = startIdx, startIdx + len do
-            chars[i] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
-        end
-    end
-    return table.concat(chars)
-end
-
 local function attachTextGlitch(label)
+    local GLITCH_CHARS = { "#", "%", "&", "@", "$", "?", "/", "\\", "=", "+", "*", "!", "~" }
+    local function scrambleText(original)
+        if #original < 1 then return original end
+        local chars = {}
+        for i = 1, #original do
+            chars[i] = string.sub(original, i, i)
+        end
+        local edits = math.max(1, math.min(#chars, 1 + math.floor(#original / 8)))
+        for _ = 1, edits do
+            chars[RNG:NextInteger(1, #chars)] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
+        end
+        if #chars >= 3 and RNG:NextNumber() < 0.4 then
+            local startIdx = RNG:NextInteger(1, #chars - 1)
+            local len = RNG:NextInteger(1, math.min(3, #chars - startIdx))
+            for i = startIdx, startIdx + len do
+                chars[i] = GLITCH_CHARS[RNG:NextInteger(1, #GLITCH_CHARS)]
+            end
+        end
+        return table.concat(chars)
+    end
     task.spawn(function()
         while guiAlive and label.Parent do
             task.wait(RNG:NextNumber(5, 10))
@@ -814,7 +797,7 @@ local function attachTextGlitch(label)
                     label.Text = scrambleText(original)
                     if i == 1 then
                         -- Chromatic hue shift while corrupted.
-                        label.TextColor3 = RNG:NextNumber() < 0.5 and M() or P()
+                        label.TextColor3 = RNG:NextNumber() < 0.5 and MUTED or P()
                         label.Rotation = RNG:NextNumber(-1.6, 1.6)
                     end
                     task.wait(RNG:NextNumber(0.03, 0.06))
@@ -1115,9 +1098,9 @@ Title.Parent = TitleBar
 
 -- Boot-style typewriter reveal for the main title, then occasional glitches.
 do
-    local fullTitle = Title.Text
     if config.Animations then
         task.spawn(function()
+            local fullTitle = Title.Text
             Title.Text = ""
             task.wait(0.25)
             local visible = ""
@@ -1245,12 +1228,13 @@ MinBtn.MouseButton1Click:Connect(function()
     end
 end)
 
-local Line1 = Instance.new("Frame")
-Line1.Size = UDim2.new(1, 0, 0, 1)
-Line1.Position = UDim2.new(0, 0, 0, 0)
-Line1.BackgroundColor3 = P()
-Line1.BorderSizePixel = 0
-Line1.Parent = Body
+Instance.new("Frame", {
+    Size = UDim2.new(1, 0, 0, 1),
+    Position = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3 = P(),
+    BorderSizePixel = 0,
+    Parent = Body,
+})
 
 local settingRefreshers = {}
 local function refreshSettingControls()
@@ -1401,7 +1385,7 @@ local function hint(parent, text, pos)
     label.BackgroundTransparency = 1
     label.Font = Enum.Font.Code
     label.TextSize = 9
-    label.TextColor3 = D()
+    label.TextColor3 = DIM
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Text = text
     label.Parent = parent
@@ -1444,7 +1428,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.5
+> SERVER FINDER v2.6
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1543,9 +1527,7 @@ hint(SettingsScroll, "need at least 1 premium player", UDim2.new(0, 6, 0, 34))
 createToggle(SettingsScroll, "ACTIVE CHAT", UDim2.new(0, 6, 0, 54), UDim2.new(1, -16, 0, 26), "FilterChat")
 hint(SettingsScroll, "need a unique message from another player", UDim2.new(0, 6, 0, 82))
 
-local SEARCH_MODES = { "SMART", "FULL", "LOW PING", "RANDOM" }
-local SEARCH_MODE_LABELS = { SMART = "SMART", FULL = "FULL", ["LOW PING"] = "LOW PING", RANDOM = "RANDOM" }
-createSelector(SettingsScroll, "SEARCH MODE", UDim2.new(0, 6, 0, 102), UDim2.new(1, -16, 0, 26), "SelectionMode", SEARCH_MODES, SEARCH_MODE_LABELS)
+createSelector(SettingsScroll, "SEARCH MODE", UDim2.new(0, 6, 0, 102), UDim2.new(1, -16, 0, 26), "SelectionMode", { "SMART", "FULL", "LOW PING", "RANDOM" }, { SMART = "SMART", FULL = "FULL", ["LOW PING"] = "LOW PING", RANDOM = "RANDOM" })
 hint(SettingsScroll, "smart balances population, ping and server FPS", UDim2.new(0, 6, 0, 130))
 
 createStepper(SettingsScroll, "MAX PING", UDim2.new(0, 6, 0, 150), UDim2.new(1, -16, 0, 26), "MaxPing", 0, 500, "ms", 25)
@@ -1560,7 +1542,7 @@ hint(SettingsScroll, "reduces races with servers that become full", UDim2.new(0,
 createStepper(SettingsScroll, "ANALYZE", UDim2.new(0, 6, 0, 294), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 20, "s")
 hint(SettingsScroll, "seconds to listen and inspect after joining", UDim2.new(0, 6, 0, 322))
 
-createSelector(SettingsScroll, "PEOPLE REGION", UDim2.new(0, 6, 0, 342), UDim2.new(1, -16, 0, 26), "PeopleRegion", REGION_ORDER, REGION_LABELS)
+createSelector(SettingsScroll, "PEOPLE REGION", UDim2.new(0, 6, 0, 342), UDim2.new(1, -16, 0, 26), "PeopleRegion", { "ANY", "RUSSIAN", "CIS", "EUROPE", "N.AMERICA", "S.AMERICA", "ASIA", "OCEANIA" }, { ANY = "ANY", RUSSIAN = "RUSSIAN", CIS = "RU / CIS", EUROPE = "EUROPE", ["N.AMERICA"] = "N. AMERICA", ["S.AMERICA"] = "S. AMERICA", ASIA = "ASIA", OCEANIA = "OCEANIA" })
 hint(SettingsScroll, "audience region, not the physical datacenter", UDim2.new(0, 6, 0, 370))
 
 createStepper(SettingsScroll, "REGION SHARE", UDim2.new(0, 6, 0, 390), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
@@ -1569,7 +1551,6 @@ hint(SettingsScroll, "minimum share among players with known country", UDim2.new
 createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 438), UDim2.new(1, -16, 0, 26), "Animations")
 hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 466))
 
-local THEME_ORDER = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA" }
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
 ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 490)
@@ -1592,8 +1573,9 @@ table.insert(settingRefreshers, refreshTheme)
 refreshTheme()
 
 ThemeSelectorBtn.MouseButton1Click:Connect(function()
-    local index = table.find(THEME_ORDER, currentTheme) or 1
-    applyTheme(THEME_ORDER[(index % #THEME_ORDER) + 1])
+    local order = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA" }
+    local index = table.find(order, currentTheme) or 1
+    applyTheme(order[(index % #order) + 1])
     refreshTheme()
     confirmBlink(ThemeSelectorBtn)
 end)
@@ -1687,7 +1669,7 @@ Stats.Position = UDim2.new(0, 8, 0, 8)
 Stats.BackgroundTransparency = 1
 Stats.Font = Enum.Font.Code
 Stats.TextSize = 10
-Stats.TextColor3 = D()
+Stats.TextColor3 = DIM
 Stats.TextXAlignment = Enum.TextXAlignment.Left
 Stats.TextTruncate = Enum.TextTruncate.AtEnd
 Stats.Text = ""
@@ -1788,7 +1770,7 @@ Status.Position = UDim2.new(0, 8, 1, -70)
 Status.BackgroundTransparency = 1
 Status.Font = Enum.Font.Code
 Status.TextSize = 10
-Status.TextColor3 = D()
+Status.TextColor3 = DIM
 Status.TextXAlignment = Enum.TextXAlignment.Left
 Status.TextTruncate = Enum.TextTruncate.AtEnd
 Status.Text = "> idle"
@@ -1936,7 +1918,7 @@ setStatus = function(text)
             -- Quick flash so status changes catch the eye.
             if config.Animations then
                 Status.TextColor3 = P()
-                tween(Status, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { TextColor3 = D() })
+                tween(Status, TweenInfo.new(0.5, Enum.EasingStyle.Quad), { TextColor3 = DIM })
             end
         end
     end
@@ -2079,7 +2061,7 @@ local function buildCard(pl)
     card.BackgroundColor3 = BLACK
     card.BackgroundTransparency = config.Animations and 1 or 0
     card.BorderSizePixel = 1
-    card.BorderColor3 = config.Animations and M() or P()
+    card.BorderColor3 = config.Animations and MUTED or P()
     card.ClipsDescendants = true
     card.Parent = Scroll
 
@@ -2406,7 +2388,7 @@ local function getUnvisitedServer(token)
                 local enoughSlots = maxPlayers > 0 and maxPlayers - playing >= config.MinFreeSlots
                 local pingAllowed = config.MaxPing <= 0 or not ping or ping <= config.MaxPing
                 local failedAt = failedServers[server.id]
-                local cooledDown = not failedAt or (os.time() - failedAt) >= FAILED_RETRY_COOLDOWN
+                local cooledDown = not failedAt or (os.time() - failedAt) >= 90
                 if enoughPlayers and enoughSlots and pingAllowed and cooledDown
                     and server.id ~= game.JobId and not visitedServers[server.id]
                 then
@@ -2491,32 +2473,6 @@ end
 
 -- Full-screen pulse fired right before a teleport is issued, so the
 -- hop reads as a brief "warp" surge rather than an instant cut.
-local function warpFlash()
-    if not config.Animations then return end
-    task.spawn(function()
-        local flash = Instance.new("Frame")
-        flash.Name = "WarpFlash"
-        flash.Size = UDim2.new(1, 0, 1, 0)
-        flash.BackgroundColor3 = P()
-        flash.BackgroundTransparency = 1
-        flash.BorderSizePixel = 0
-        flash.ZIndex = 500
-        flash.Parent = ScreenGui
-        tween(flash, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            BackgroundTransparency = 0.5,
-        })
-        task.wait(0.16)
-        if flash.Parent then
-            tween(flash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-                BackgroundTransparency = 1,
-            })
-            task.delay(0.42, function()
-                if flash.Parent then flash:Destroy() end
-            end)
-        end
-    end)
-end
-
 local function startSearchSpinner(token)
     task.spawn(function()
         local spin = { "/", "-", "\\", "|" }
@@ -2580,7 +2536,7 @@ executeHop = function()
     isHopping = true
     hopToken = hopToken + 1
     local token = hopToken
-    lastHopStart = os.clock()
+    sessionStats.lastHopStart = os.clock()
     pendingServerId = nil
     setProgress(0, P(), true)
     startSearchSpinner(token)
@@ -2638,7 +2594,30 @@ executeHop = function()
         end)
     end
 
-    warpFlash()
+    if config.Animations then
+        task.spawn(function()
+            local flash = Instance.new("Frame")
+            flash.Name = "WarpFlash"
+            flash.Size = UDim2.new(1, 0, 1, 0)
+            flash.BackgroundColor3 = P()
+            flash.BackgroundTransparency = 1
+            flash.BorderSizePixel = 0
+            flash.ZIndex = 500
+            flash.Parent = ScreenGui
+            tween(flash, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                BackgroundTransparency = 0.5,
+            })
+            task.wait(0.16)
+            if flash.Parent then
+                tween(flash, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    BackgroundTransparency = 1,
+                })
+                task.delay(0.42, function()
+                    if flash.Parent then flash:Destroy() end
+                end)
+            end
+        end)
+    end
 
     local ok, teleportError = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
@@ -2677,7 +2656,7 @@ end))
 -- of silently freezing forever.
 task.spawn(function()
     while guiAlive do
-        if isHopping and (os.clock() - lastHopStart) > (TELEPORT_TIMEOUT + 3) then
+        if isHopping and (os.clock() - sessionStats.lastHopStart) > (TELEPORT_TIMEOUT + 3) then
             failHop(hopToken, "hop stalled; recovering and retrying", pendingServerId)
         end
         task.wait(1)
