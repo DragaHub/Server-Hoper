@@ -65,10 +65,10 @@ local function setQueue()
         or (env and env.queue_on_teleport)
     if type(q) ~= "function" then return false end
     local mirrorList = table.concat({
-        string.format("%q", "https://raw.githack.com/DragaHub/Server-Hoper/main/main.lua"),
-        string.format("%q", "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"),
-        string.format("%q", "https://github.com/DragaHub/Server-Hoper/raw/main/main.lua"),
-        string.format("%q", "https://cdn.jsdelivr.net/gh/DragaHub/Server-Hoper@main/main.lua"),
+        "\"https://raw.githack.com/DragaHub/Server-Hoper/main/main.lua\"",
+        "\"https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua\"",
+        "\"https://github.com/DragaHub/Server-Hoper/raw/main/main.lua\"",
+        "\"https://cdn.jsdelivr.net/gh/DragaHub/Server-Hoper@main/main.lua\"",
     }, ", ")
     local ok = pcall(function()
         q(string.format([[
@@ -1229,13 +1229,12 @@ MinBtn.MouseButton1Click:Connect(function()
     end
 end)
 
-Instance.new("Frame", {
-    Size = UDim2.new(1, 0, 0, 1),
-    Position = UDim2.new(0, 0, 0, 0),
-    BackgroundColor3 = P(),
-    BorderSizePixel = 0,
-    Parent = Body,
-})
+local Line1 = Instance.new("Frame")
+Line1.Size = UDim2.new(1, 0, 0, 1)
+Line1.Position = UDim2.new(0, 0, 0, 0)
+Line1.BackgroundColor3 = P()
+Line1.BorderSizePixel = 0
+Line1.Parent = Body
 
 local settingRefreshers = {}
 local function refreshSettingControls()
