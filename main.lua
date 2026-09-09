@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.6"
+local VERSION = "2.7"
 
 local guiAlive = true
 local isHopping = false
@@ -80,7 +80,7 @@ local function setQueue()
             local urls = { %s }
             for _, u in ipairs(urls) do
                 local ok2, body = pcall(function() return game:HttpGet(u) end)
-                if ok2 and type(body) == "string" and body ~= "" and body:find('VERSION = "2.6"', 1, true) then
+                if ok2 and type(body) == "string" and body ~= "" and body:find('SERVER FINDER', 1, true) then
                     local chunk = loadstring(body)
                     if chunk then
                         chunk()
@@ -209,6 +209,8 @@ local THEMES = {
     ["AMBER"] = Color3.fromRGB(255, 178, 80),
     ["CYAN"] = Color3.fromRGB(90, 220, 255),
     ["MAGENTA"] = Color3.fromRGB(255, 110, 235),
+    ["RED"] = Color3.fromRGB(255, 95, 95),
+    ["BLUE"] = Color3.fromRGB(110, 150, 255),
 }
 
 local defaultSettings = {
@@ -217,6 +219,7 @@ local defaultSettings = {
     FilterChat = false,
     MinPlayers = 3,
     MinFreeSlots = 2,
+    MinFps = 0,
     AnalyzeSeconds = 5,
     SelectionMode = "SMART",
     MaxPing = 0,
@@ -224,6 +227,9 @@ local defaultSettings = {
     MinRegionPercent = 35,
     Animations = true,
     Theme = "SNOW",
+    MainX = -170,
+    MainY = -270,
+    Welcomed = false,
 }
 
 local VALID_REGIONS = {
@@ -251,7 +257,7 @@ local function finiteNumber(value, fallback)
 end
 
 local function normalizeSettings(cfg)
-    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations" }) do
+    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations", "Welcomed" }) do
         if type(cfg[key]) ~= "boolean" then
             cfg[key] = defaultSettings[key]
         end
@@ -260,7 +266,10 @@ local function normalizeSettings(cfg)
     cfg.MinFreeSlots = math.clamp(math.floor(finiteNumber(cfg.MinFreeSlots, defaultSettings.MinFreeSlots)), 1, 20)
     cfg.AnalyzeSeconds = math.clamp(math.floor(finiteNumber(cfg.AnalyzeSeconds, defaultSettings.AnalyzeSeconds)), 2, 20)
     cfg.MaxPing = math.clamp(math.floor(finiteNumber(cfg.MaxPing, defaultSettings.MaxPing)), 0, 500)
+    cfg.MinFps = math.clamp(math.floor(finiteNumber(cfg.MinFps, defaultSettings.MinFps)), 0, 60)
     cfg.MinRegionPercent = math.clamp(math.floor(finiteNumber(cfg.MinRegionPercent, defaultSettings.MinRegionPercent)), 10, 100)
+    cfg.MainX = math.clamp(math.floor(finiteNumber(cfg.MainX, defaultSettings.MainX)), -5000, 5000)
+    cfg.MainY = math.clamp(math.floor(finiteNumber(cfg.MainY, defaultSettings.MainY)), -5000, 5000)
     if type(cfg.PeopleRegion) ~= "string" or not VALID_REGIONS[cfg.PeopleRegion] then
         cfg.PeopleRegion = defaultSettings.PeopleRegion
     end
@@ -661,7 +670,7 @@ local function clampToViewport(frame)
     end
 end
 
-local function makeDraggable(frame, handle)
+local function makeDraggable(frame, handle, onDrop)
     local dragging = false
     local dragStart = nil
     local startPos = nil
@@ -687,6 +696,7 @@ local function makeDraggable(frame, handle)
                 dragging = false
                 dragInput = nil
                 clampToViewport(frame)
+                if onDrop then onDrop(frame) end
                 if endConnection then
                     endConnection:Disconnect()
                     endConnection = nil
@@ -1044,7 +1054,7 @@ local MINIMIZED_SIZE = UDim2.new(0, 340, 0, 32)
 local Main = Instance.new("Frame")
 Main.Name = "Main"
 Main.Size = EXPANDED_SIZE
-Main.Position = UDim2.new(0.5, -170, 0.5, -270)
+Main.Position = UDim2.new(0.5, config.MainX, 0.5, config.MainY)
 Main.BackgroundColor3 = BLACK
 Main.BorderSizePixel = 1
 Main.BorderColor3 = P()
@@ -1069,7 +1079,7 @@ tween(Main, TweenInfo.new(0.34, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     Rotation = 0,
 })
 tween(Main, TweenInfo.new(0.38, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-    Position = UDim2.new(0.5, -170, 0.5, -270),
+    Position = UDim2.new(0.5, config.MainX, 0.5, config.MainY),
 })
 tween(MainScale, TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
     Scale = responsiveMainScale,
@@ -1083,7 +1093,11 @@ TitleBar.Name = "TitleBar"
 TitleBar.Size = UDim2.new(1, 0, 0, 30)
 TitleBar.BackgroundTransparency = 1
 TitleBar.Parent = Main
-makeDraggable(Main, TitleBar)
+makeDraggable(Main, TitleBar, function(frame)
+    config.MainX = frame.Position.X.Offset
+    config.MainY = frame.Position.Y.Offset
+    saveSettings(config)
+end)
 Main.InputBegan:Connect(function() raiseWindow(Main) end)
 
 local Title = Instance.new("TextLabel")
@@ -1138,24 +1152,8 @@ local function makeHeaderButton(text, xOffset)
     return btn
 end
 
-local function makeHeaderImageButton(imageId, xOffset)
-    local btn = Instance.new("ImageButton")
-    btn.Size = UDim2.new(0, 20, 0, 20)
-    btn.Position = UDim2.new(1, xOffset, 0, 5)
-    btn.BackgroundColor3 = BLACK
-    btn.BorderSizePixel = 1
-    btn.BorderColor3 = P()
-    btn.Image = "rbxassetid://" .. tostring(imageId)
-    btn.ImageColor3 = P()
-    btn.ScaleType = Enum.ScaleType.Fit
-    btn.AutoButtonColor = false
-    btn.Parent = Main
-    setupRetroButton(btn)
-    return btn
-end
-
 local MinBtn = makeHeaderButton("_", -97)
-local SettingsBtn = makeHeaderImageButton(5912368781, -75)
+local SettingsBtn = makeHeaderButton("S", -75)
 local InfoBtn = makeHeaderButton("?", -50)
 local CloseBtn = makeHeaderButton("X", -25)
 
@@ -1428,7 +1426,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.6
+> SERVER FINDER v2.7
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1449,7 +1447,8 @@ InfoTextLabel.Text = [[
 
 4. FILTERS
    Premium, active chat, minimum players, free slots,
-   optional max ping and audience region.
+   optional max ping, minimum server FPS and audience
+   region.
 
 5. PEOPLE REGION
    Roblox does not expose a physical datacenter in
@@ -1486,10 +1485,10 @@ InfoTextLabel.Text = [[
 
 10. THEMES
    Cycle the terminal accent from Settings:
-   SNOW (default, classic white), TERMINAL
-   GREEN, AMBER, CYAN and MAGENTA. Only the
-   main accent changes; hints stay neutral.
-   The choice is saved and survives server hops.
+   SNOW (default), TERMINAL GREEN, AMBER, CYAN,
+   MAGENTA, RED and BLUE. Only the main accent
+   changes; hints stay neutral. The choice is
+   saved and survives server hops.
 
 11. AUTO-LOOP STOP RULES
    The loop stops only when every ACTIVE filter
@@ -1500,6 +1499,11 @@ InfoTextLabel.Text = [[
 
 12. HOP ONCE
    Jumps without changing the saved auto-loop setting.
+
+13. WINDOW POSITION
+   Drag the main window anywhere; its position is
+   remembered across hops and sessions. RESET in
+   Settings returns it to the screen centre.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -1518,7 +1522,7 @@ SettingsScroll.BackgroundTransparency = 1
 SettingsScroll.BorderSizePixel = 0
 SettingsScroll.ScrollBarThickness = 3
 SettingsScroll.ScrollBarImageColor3 = P()
-SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 600)
+SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 626)
 SettingsScroll.Parent = SettingsWin.Body
 
 createToggle(SettingsScroll, "DONATORS", UDim2.new(0, 6, 0, 6), UDim2.new(1, -16, 0, 26), "FilterDonators")
@@ -1533,27 +1537,30 @@ hint(SettingsScroll, "smart balances population, ping and server FPS", UDim2.new
 createStepper(SettingsScroll, "MAX PING", UDim2.new(0, 6, 0, 150), UDim2.new(1, -16, 0, 26), "MaxPing", 0, 500, "ms", 25)
 hint(SettingsScroll, "0 disables ping filtering; missing API ping is allowed", UDim2.new(0, 6, 0, 178))
 
-createStepper(SettingsScroll, "MIN PLAYERS", UDim2.new(0, 6, 0, 198), UDim2.new(1, -16, 0, 26), "MinPlayers", 1, 100, "")
-hint(SettingsScroll, "skip quiet servers below this population", UDim2.new(0, 6, 0, 226))
+createStepper(SettingsScroll, "MIN FPS", UDim2.new(0, 6, 0, 198), UDim2.new(1, -16, 0, 26), "MinFps", 0, 60, "", 5)
+hint(SettingsScroll, "0 disables; skip servers below this reported FPS", UDim2.new(0, 6, 0, 226))
 
-createStepper(SettingsScroll, "FREE SLOTS", UDim2.new(0, 6, 0, 246), UDim2.new(1, -16, 0, 26), "MinFreeSlots", 1, 20, "")
-hint(SettingsScroll, "reduces races with servers that become full", UDim2.new(0, 6, 0, 274))
+createStepper(SettingsScroll, "MIN PLAYERS", UDim2.new(0, 6, 0, 224), UDim2.new(1, -16, 0, 26), "MinPlayers", 1, 100, "")
+hint(SettingsScroll, "skip quiet servers below this population", UDim2.new(0, 6, 0, 252))
 
-createStepper(SettingsScroll, "ANALYZE", UDim2.new(0, 6, 0, 294), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 20, "s")
-hint(SettingsScroll, "seconds to listen and inspect after joining", UDim2.new(0, 6, 0, 322))
+createStepper(SettingsScroll, "FREE SLOTS", UDim2.new(0, 6, 0, 272), UDim2.new(1, -16, 0, 26), "MinFreeSlots", 1, 20, "")
+hint(SettingsScroll, "reduces races with servers that become full", UDim2.new(0, 6, 0, 300))
 
-createSelector(SettingsScroll, "PEOPLE REGION", UDim2.new(0, 6, 0, 342), UDim2.new(1, -16, 0, 26), "PeopleRegion", { "ANY", "RUSSIAN", "CIS", "EUROPE", "N.AMERICA", "S.AMERICA", "ASIA", "OCEANIA" }, { ANY = "ANY", RUSSIAN = "RUSSIAN", CIS = "RU / CIS", EUROPE = "EUROPE", ["N.AMERICA"] = "N. AMERICA", ["S.AMERICA"] = "S. AMERICA", ASIA = "ASIA", OCEANIA = "OCEANIA" })
-hint(SettingsScroll, "audience region, not the physical datacenter", UDim2.new(0, 6, 0, 370))
+createStepper(SettingsScroll, "ANALYZE", UDim2.new(0, 6, 0, 320), UDim2.new(1, -16, 0, 26), "AnalyzeSeconds", 2, 20, "s")
+hint(SettingsScroll, "seconds to listen and inspect after joining", UDim2.new(0, 6, 0, 348))
 
-createStepper(SettingsScroll, "REGION SHARE", UDim2.new(0, 6, 0, 390), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
-hint(SettingsScroll, "minimum share among players with known country", UDim2.new(0, 6, 0, 418))
+createSelector(SettingsScroll, "PEOPLE REGION", UDim2.new(0, 6, 0, 368), UDim2.new(1, -16, 0, 26), "PeopleRegion", { "ANY", "RUSSIAN", "CIS", "EUROPE", "N.AMERICA", "S.AMERICA", "ASIA", "OCEANIA" }, { ANY = "ANY", RUSSIAN = "RUSSIAN", CIS = "RU / CIS", EUROPE = "EUROPE", ["N.AMERICA"] = "N. AMERICA", ["S.AMERICA"] = "S. AMERICA", ASIA = "ASIA", OCEANIA = "OCEANIA" })
+hint(SettingsScroll, "audience region, not the physical datacenter", UDim2.new(0, 6, 0, 396))
 
-createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 438), UDim2.new(1, -16, 0, 26), "Animations")
-hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 466))
+createStepper(SettingsScroll, "REGION SHARE", UDim2.new(0, 6, 0, 416), UDim2.new(1, -16, 0, 26), "MinRegionPercent", 10, 100, "%", 5)
+hint(SettingsScroll, "minimum share among players with known country", UDim2.new(0, 6, 0, 444))
+
+createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 464), UDim2.new(1, -16, 0, 26), "Animations")
+hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 492))
 
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
-ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 490)
+ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 516)
 ThemeSelectorBtn.BackgroundColor3 = BLACK
 ThemeSelectorBtn.BorderSizePixel = 1
 ThemeSelectorBtn.BorderColor3 = P()
@@ -1573,17 +1580,17 @@ table.insert(settingRefreshers, refreshTheme)
 refreshTheme()
 
 ThemeSelectorBtn.MouseButton1Click:Connect(function()
-    local order = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA" }
+    local order = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA", "RED", "BLUE" }
     local index = table.find(order, currentTheme) or 1
     applyTheme(order[(index % #order) + 1])
     refreshTheme()
     confirmBlink(ThemeSelectorBtn)
 end)
-hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 518))
+hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 544))
 
 local ClearHistoryBtn = Instance.new("TextButton")
 ClearHistoryBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 534)
+ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 560)
 ClearHistoryBtn.BackgroundColor3 = BLACK
 ClearHistoryBtn.BorderSizePixel = 1
 ClearHistoryBtn.BorderColor3 = P()
@@ -1597,7 +1604,7 @@ setupRetroButton(ClearHistoryBtn)
 
 local ResetSettingsBtn = Instance.new("TextButton")
 ResetSettingsBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 534)
+ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 560)
 ResetSettingsBtn.BackgroundColor3 = BLACK
 ResetSettingsBtn.BorderSizePixel = 1
 ResetSettingsBtn.BorderColor3 = P()
@@ -1627,6 +1634,9 @@ ResetSettingsBtn.MouseButton1Click:Connect(function()
     refreshSettingControls()
     applyTheme("SNOW", false)
     refreshTheme()
+    tween(Main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0.5, -170, 0.5, -270),
+    })
     if updateBtnText then updateBtnText() end
     if notify then notify("Settings restored", GREEN) end
 end)
@@ -1954,7 +1964,7 @@ updateStats = function()
     local job = tostring(game.JobId or "")
     local shortJob = #job > 8 and (string.sub(job, 1, 8) .. "..") or job
     Stats.Text = string.format(
-        "%s | %d here | %d seen | hop %d/%d",
+        "%s | %d here | %d seen | hop %d | fail %d",
         shortJob,
         n,
         countVisited(),
@@ -2224,9 +2234,15 @@ local function trackPlayer(pl)
     local conns = {}
     playerConns[pl.UserId] = conns
     if pl ~= LocalPlayer then
-        table.insert(conns, pl.Chatted:Connect(function(message)
-            bumpChat(pl.UserId, message)
-        end))
+        -- Player.Chatted belongs to legacy chat. After the 2025 shutdown
+        -- of LegacyChatService it may stop firing or be removed entirely;
+        -- TextChatService.MessageReceived covers modern chat, so guard the
+        -- connection so a future removal cannot break player tracking.
+        pcall(function()
+            table.insert(conns, pl.Chatted:Connect(function(message)
+                bumpChat(pl.UserId, message)
+            end))
+        end)
         task.spawn(function()
             local code = lookupCountry(pl)
             if code and scheduleRender then scheduleRender() end
@@ -2387,9 +2403,10 @@ local function getUnvisitedServer(token)
                 local enoughPlayers = playing >= config.MinPlayers
                 local enoughSlots = maxPlayers > 0 and maxPlayers - playing >= config.MinFreeSlots
                 local pingAllowed = config.MaxPing <= 0 or not ping or ping <= config.MaxPing
+                local fpsAllowed = config.MinFps <= 0 or not fps or fps >= config.MinFps
                 local failedAt = failedServers[server.id]
                 local cooledDown = not failedAt or (os.time() - failedAt) >= 90
-                if enoughPlayers and enoughSlots and pingAllowed and cooledDown
+                if enoughPlayers and enoughSlots and pingAllowed and fpsAllowed and cooledDown
                     and server.id ~= game.JobId and not visitedServers[server.id]
                 then
                     candidateIds[server.id] = true
@@ -2577,6 +2594,7 @@ executeHop = function()
 
     local details = string.format("%d/%d", target.playing, target.maxPlayers)
     if target.ping then details = details .. string.format(" %dms", math.floor(target.ping)) end
+    if target.fps then details = details .. string.format(" %dfps", math.floor(target.fps)) end
     setStatus("teleport " .. string.sub(target.id, 1, 8) .. ".. | " .. details)
     notify("Server selected: " .. details, GREEN)
 
@@ -2911,6 +2929,17 @@ rememberConnection(UserInputService.InputBegan:Connect(function(input, processed
         clampToViewport(Main)
     end
 end))
+
+-- First-run hint so new users immediately see the controls.
+if not config.Welcomed then
+    config.Welcomed = true
+    saveSettings(config, true)
+    task.delay(1.2, function()
+        if guiAlive then
+            notify("HOP ONCE = jump now | START AUTO-LOOP = scan | gear = settings | ? = help", P())
+        end
+    end)
+end
 
 if config.AutoHop then
     task.spawn(evaluateServer)
