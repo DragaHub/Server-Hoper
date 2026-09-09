@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.8"
+local VERSION = "2.9"
 
 local guiAlive = true
 local isHopping = false
@@ -183,6 +183,54 @@ saveVisited(visitedServers)
 -- cooldown. Without this, a rolled-back server is instantly re-selected,
 -- fails again, and the hopper looks permanently stuck on a full server.
 local failedServers = {}
+
+-- Rate-limit guard for games.roblox.com. Roblox caps how many public
+-- server-list requests one IP may send per minute; a 429 means the cap
+-- was hit. The cooldown doubles on repeated 429s, is persisted to disk
+-- so it survives teleports (every hop runs a fresh script instance) and
+-- decays again once the API answers normally.
+local RATE_LIMIT_FILE = "ServerFinderRateLimit.json"
+local rateLimitBackoff = 4
+local rateLimitedUntilEpoch = 0
+
+if canReadFile(RATE_LIMIT_FILE) then
+    pcall(function()
+        local v = tonumber(HttpService:JSONDecode(readfile(RATE_LIMIT_FILE)))
+        if type(v) == "number" and v > 0 then
+            rateLimitedUntilEpoch = v
+        end
+    end)
+end
+
+local function rateLimitCooldown()
+    return math.max(0, rateLimitedUntilEpoch - os.time())
+end
+
+local function noteRateLimited(retryAfter)
+    if type(retryAfter) == "number" and retryAfter > 0 then
+        rateLimitBackoff = math.min(60, math.max(rateLimitBackoff, retryAfter))
+    else
+        rateLimitBackoff = math.min(60, rateLimitBackoff * 2)
+    end
+    rateLimitedUntilEpoch = os.time() + rateLimitBackoff
+    pcall(function()
+        if type(writefile) == "function" then
+            writefile(RATE_LIMIT_FILE, HttpService:JSONEncode(rateLimitedUntilEpoch))
+        end
+    end)
+end
+
+local function noteRateLimitOk()
+    if rateLimitedUntilEpoch > os.time() or rateLimitBackoff ~= 4 then
+        rateLimitedUntilEpoch = 0
+        rateLimitBackoff = 4
+        pcall(function()
+            if type(writefile) == "function" then
+                writefile(RATE_LIMIT_FILE, HttpService:JSONEncode(0))
+            end
+        end)
+    end
+end
 
 local function forgetOldestVisited(keep)
     visitedServers = pruneVisited(visitedServers, keep)
@@ -1427,7 +1475,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.8
+> SERVER FINDER v2.9
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1445,6 +1493,9 @@ InfoTextLabel.Text = [[
    immediately moves on to another server instead
    of re-selecting the same full one. A watchdog
    guarantees the hopper never freezes mid-hop.
+   HTTP 429 rate limits are handled with an
+   automatic, doubling back-off that survives
+   server hops, so the API is never hammered.
 
 4. FILTERS
    Premium, active chat, minimum players, free slots,
@@ -2277,14 +2328,15 @@ end))
 
 local function parseHttpResponse(res)
     if type(res) == "string" then
-        return 200, res
+        return 200, res, nil
     end
     if type(res) ~= "table" then
-        return nil, nil
+        return nil, nil, nil
     end
     local status = tonumber(res.StatusCode or res.Status or res.status_code or res.status)
     local body = res.Body or res.body or res.SuccessBody
-    return status, body
+    local headers = res.Headers or res.headers
+    return status, body, headers
 end
 
 local function hopStillActive(token)
@@ -2316,18 +2368,34 @@ local function httpGet(url, token)
         end
 
         if success then
-            local status, body = parseHttpResponse(res)
+            local status, body, headers = parseHttpResponse(res)
             if type(body) == "string" and body ~= ""
                 and (not status or status == 0 or (status >= 200 and status < 300))
             then
+                noteRateLimitOk()
                 return body, nil
             end
-            if status and status ~= 429 and status >= 400 and status < 500 then
+            if status == 429 then
+                local retryAfter = nil
+                if type(headers) == "table" then
+                    retryAfter = tonumber(headers["Retry-After"] or headers["retry-after"] or headers["retry_after"])
+                end
+                noteRateLimited(retryAfter)
+                return nil, "rate limited"
+            end
+            if status and status >= 400 and status < 500 then
                 return nil, "api http " .. tostring(status)
             end
             lastError = status and ("api http " .. tostring(status)) or "empty http response"
         else
             lastError = "http request failed"
+            -- game:HttpGet raises an error string on non-2xx, e.g.
+            -- "HTTP 429 (Too Many Requests)". Detect it and back off.
+            local errText = tostring(res)
+            if errText and errText:find("429", 1, true) then
+                noteRateLimited(nil)
+                return nil, "rate limited"
+            end
         end
 
         local backoff = math.min(2.5, 0.3 * (2 ^ (attempt - 1))) + RNG:NextNumber(0, 0.15)
@@ -2401,6 +2469,16 @@ local function getUnvisitedServer(token)
 
         local decoded, data = pcall(function() return HttpService:JSONDecode(body) end)
         if not (decoded and type(data) == "table" and type(data.data) == "table") then
+            -- A 429 response is a JSON error object without a .data array;
+            -- surface it as a rate limit so the caller backs off instead
+            -- of treating it like a corrupt payload.
+            if decoded and type(data) == "table" and type(data.errors) == "table" and data.errors[1] then
+                local code = data.errors[1].code
+                if code == 429 or code == "429" then
+                    noteRateLimited(nil)
+                    return nil, "rate limited"
+                end
+            end
             return nil, "bad api payload"
         end
         for _, server in ipairs(data.data) do
@@ -2434,7 +2512,7 @@ local function getUnvisitedServer(token)
         if #candidates >= targetCount then break end
         if type(data.nextPageCursor) ~= "string" or data.nextPageCursor == "" then break end
         cursor = data.nextPageCursor
-        task.wait(0.02)
+        task.wait(0.25)
     end
 
     local chosen = pickServer(candidates)
@@ -2561,6 +2639,20 @@ end
 
 executeHop = function()
     if isHopping or not guiAlive then return end
+
+    -- Respect an active rate-limit cooldown instead of hammering the API
+    -- again. Waiting here (rather than during the hop) keeps the
+    -- watchdog from interrupting a legitimate cooldown.
+    local cooldown = rateLimitCooldown()
+    if cooldown > 0 then
+        setStatus(string.format("rate limited; retry in %.0fs", cooldown))
+        notify("HTTP 429 — backing off " .. math.floor(cooldown) .. "s", RED)
+        if config.AutoHop then
+            retryAuto(hopToken, cooldown + 1)
+        end
+        return
+    end
+
     isHopping = true
     hopToken = hopToken + 1
     local token = hopToken
@@ -2582,6 +2674,18 @@ executeHop = function()
 
     if not target then
         isHopping = false
+        if err == "rate limited" then
+            local wait = math.max(rateLimitCooldown(), 2) + 1
+            sessionStats.failures = sessionStats.failures + 1
+            setStatus(string.format("rate limited; retry in %.0fs", wait))
+            notify("HTTP 429 — backing off " .. math.floor(wait) .. "s", RED)
+            setProgress(1, RED)
+            updateBtnText()
+            updateStats()
+            shakeMain()
+            retryAuto(token, wait)
+            return
+        end
         if err == "no unvisited servers" then
             recycleVisitedIfStuck()
         else
