@@ -65,10 +65,10 @@ local function setQueue()
         or (env and env.queue_on_teleport)
     if type(q) ~= "function" then return false end
     local mirrorList = table.concat({
-        string.format("%q", "https://cdn.jsdelivr.net/gh/DragaHub/Server-Hoper@main/main.lua"),
         string.format("%q", "https://raw.githack.com/DragaHub/Server-Hoper/main/main.lua"),
-        string.format("%q", "https://github.com/DragaHub/Server-Hoper/raw/main/main.lua"),
         string.format("%q", "https://raw.githubusercontent.com/DragaHub/Server-Hoper/main/main.lua"),
+        string.format("%q", "https://github.com/DragaHub/Server-Hoper/raw/main/main.lua"),
+        string.format("%q", "https://cdn.jsdelivr.net/gh/DragaHub/Server-Hoper@main/main.lua"),
     }, ", ")
     local ok = pcall(function()
         q(string.format([[
@@ -78,15 +78,16 @@ local function setQueue()
                 game:GetService("Players"):GetPropertyChangedSignal("LocalPlayer"):Wait()
             end
             local urls = { %s }
-            local src = nil
             for _, u in ipairs(urls) do
                 local ok2, body = pcall(function() return game:HttpGet(u) end)
-                if ok2 and type(body) == "string" and body ~= "" then
-                    src = body
-                    break
+                if ok2 and type(body) == "string" and body ~= "" and body:find('VERSION = "2.6"', 1, true) then
+                    local chunk = loadstring(body)
+                    if chunk then
+                        chunk()
+                        break
+                    end
                 end
             end
-            if src then loadstring(src)() end
         ]], mirrorList))
     end)
     return ok
