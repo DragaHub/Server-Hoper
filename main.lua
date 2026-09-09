@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.7"
+local VERSION = "2.8"
 
 local guiAlive = true
 local isHopping = false
@@ -226,6 +226,7 @@ local defaultSettings = {
     PeopleRegion = "ANY",
     MinRegionPercent = 35,
     Animations = true,
+    AntiAfk = true,
     Theme = "SNOW",
     MainX = -170,
     MainY = -270,
@@ -257,7 +258,7 @@ local function finiteNumber(value, fallback)
 end
 
 local function normalizeSettings(cfg)
-    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations", "Welcomed" }) do
+    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations", "AntiAfk", "Welcomed" }) do
         if type(cfg[key]) ~= "boolean" then
             cfg[key] = defaultSettings[key]
         end
@@ -1426,7 +1427,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.7
+> SERVER FINDER v2.8
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1505,6 +1506,13 @@ InfoTextLabel.Text = [[
    remembered across hops and sessions. RESET in
    Settings returns it to the screen centre.
 
+14. ANTI-AFK
+   Keeps the account awake while you are away:
+   disables the idle kick where possible, resets
+   idle instantly and sends a heartbeat so you are
+   never disconnected for standing still. Toggle
+   in Settings (default ON).
+
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
 
@@ -1522,7 +1530,7 @@ SettingsScroll.BackgroundTransparency = 1
 SettingsScroll.BorderSizePixel = 0
 SettingsScroll.ScrollBarThickness = 3
 SettingsScroll.ScrollBarImageColor3 = P()
-SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 626)
+SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 652)
 SettingsScroll.Parent = SettingsWin.Body
 
 createToggle(SettingsScroll, "DONATORS", UDim2.new(0, 6, 0, 6), UDim2.new(1, -16, 0, 26), "FilterDonators")
@@ -1558,9 +1566,12 @@ hint(SettingsScroll, "minimum share among players with known country", UDim2.new
 createToggle(SettingsScroll, "ANIMATIONS", UDim2.new(0, 6, 0, 464), UDim2.new(1, -16, 0, 26), "Animations")
 hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0, 492))
 
+createToggle(SettingsScroll, "ANTI AFK", UDim2.new(0, 6, 0, 518), UDim2.new(1, -16, 0, 26), "AntiAfk")
+hint(SettingsScroll, "auto-reset idle so you can walk away while it works", UDim2.new(0, 6, 0, 546))
+
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
-ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 516)
+ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 570)
 ThemeSelectorBtn.BackgroundColor3 = BLACK
 ThemeSelectorBtn.BorderSizePixel = 1
 ThemeSelectorBtn.BorderColor3 = P()
@@ -1586,11 +1597,11 @@ ThemeSelectorBtn.MouseButton1Click:Connect(function()
     refreshTheme()
     confirmBlink(ThemeSelectorBtn)
 end)
-hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 544))
+hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 598))
 
 local ClearHistoryBtn = Instance.new("TextButton")
 ClearHistoryBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 560)
+ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 618)
 ClearHistoryBtn.BackgroundColor3 = BLACK
 ClearHistoryBtn.BorderSizePixel = 1
 ClearHistoryBtn.BorderColor3 = P()
@@ -1604,7 +1615,7 @@ setupRetroButton(ClearHistoryBtn)
 
 local ResetSettingsBtn = Instance.new("TextButton")
 ResetSettingsBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 560)
+ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 618)
 ResetSettingsBtn.BackgroundColor3 = BLACK
 ResetSettingsBtn.BorderSizePixel = 1
 ResetSettingsBtn.BorderColor3 = P()
@@ -2940,6 +2951,54 @@ if not config.Welcomed then
         end
     end)
 end
+
+-- ============================================================
+-- ANTI-AFK
+-- Keeps the account awake while the hopper runs so the user can
+-- walk away without being kicked for ~20-minute idleness.
+--   layer 1: neutralise the idle kick by disabling existing
+--             Player.Idled connections (needs getconnections)
+--   layer 2: hook Idled and instantly fake a click (resets idle)
+--   layer 3: heartbeat fakes input before idle even triggers
+-- Toggle: ANTI AFK in Settings (default ON).
+-- ============================================================
+local VirtualUser = game:GetService("VirtualUser")
+
+local function pokeInput()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0, 0))
+    end)
+end
+
+pcall(function()
+    if type(getconnections) == "function" and LocalPlayer.Idled then
+        for _, conn in pairs(getconnections(LocalPlayer.Idled)) do
+            pcall(function()
+                conn:Disable()
+            end)
+        end
+    end
+end)
+
+local lastAntiAfkNotice = 0
+rememberConnection(LocalPlayer.Idled:Connect(function()
+    if not config.AntiAfk then return end
+    pokeInput()
+    if os.time() - lastAntiAfkNotice > 90 then
+        lastAntiAfkNotice = os.time()
+        notify("Anti-AFK: idle reset", P())
+    end
+end))
+
+task.spawn(function()
+    while guiAlive do
+        task.wait(120)
+        if guiAlive and config.AntiAfk then
+            pokeInput()
+        end
+    end
+end)
 
 if config.AutoHop then
     task.spawn(evaluateServer)
