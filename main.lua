@@ -1613,11 +1613,15 @@ InfoTextLabel.Text = [[
 15. RICK AND MORTY PORTAL
    Pick the RICK AND MORTY theme for the portal
    gun look. Three seconds before a teleport a
-   green portal opens in front of you (sound,
-   green flash, glow and a burst of neon parts).
-   Walk into it to jump; on the new server a
-   closing portal appears behind you and seals
-   itself. No shockwave rings are used.
+   green portal opens in front of you: a
+   transparent plate carrying the portal image
+   on both sides, with an open flash, glow,
+   orbiting sparks, rising embers and a burst of
+   neon parts. Your character walks into it on
+   its own (PORTAL GATE), the teleport fires on
+   time and, on the new server, a portal opens
+   behind you and seals itself with a particle
+   implosion. No shockwave rings are used.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -1676,7 +1680,7 @@ createToggle(SettingsScroll, "ANTI AFK", UDim2.new(0, 6, 0, 518), UDim2.new(1, -
 hint(SettingsScroll, "auto-reset idle so you can walk away while it works", UDim2.new(0, 6, 0, 546))
 
 createToggle(SettingsScroll, "PORTAL GATE", UDim2.new(0, 6, 0, 570), UDim2.new(1, -16, 0, 26), "PortalGate")
-hint(SettingsScroll, "R&M theme: walk into the portal to teleport", UDim2.new(0, 6, 0, 598))
+hint(SettingsScroll, "R&M theme: auto-walks you into the portal to teleport", UDim2.new(0, 6, 0, 598))
 
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
@@ -2966,9 +2970,11 @@ Portal = (function()
     local OPEN_SOUND = "rbxassetid://1013378689"
     local CLOSE_SOUND = "rbxassetid://79092478163364"
     local GLOW = Color3.fromRGB(140, 255, 96)
-    local ENTER_RADIUS = 4
+    local GLOW_SOFT = Color3.fromRGB(90, 255, 160)
+    local ENTER_RADIUS = 5
     local ENTRY_TIMEOUT = 20
     local MIN_OPEN = 3
+    local AUTO_WALK_DELAY = 1.2
 
     local lastPortal = nil
 
@@ -3002,6 +3008,12 @@ Portal = (function()
         return nil
     end
 
+    local function humanoid()
+        local c = LocalPlayer.Character
+        if c then return c:FindFirstChildOfClass("Humanoid") end
+        return nil
+    end
+
     local function forwardVector()
         local look = Vector3.new(0, 0, -1)
         local cam = workspace.CurrentCamera
@@ -3013,34 +3025,106 @@ Portal = (function()
         return look.Unit
     end
 
-    -- Burst of small neon parts that scatter, fade and vanish.
-    local function burst(center, count)
+    -- Small glowing ball helper used by every particle effect.
+    local function spawnBall(size, color, transparency)
+        local p = Instance.new("Part")
+        p.Size = Vector3.new(size, size, size)
+        p.Shape = Enum.PartType.Ball
+        p.Anchored = true
+        p.CanCollide = false
+        p.Material = Enum.Material.Neon
+        p.Color = color or GLOW
+        p.Transparency = transparency or 0
+        p.Parent = workspace
+        return p
+    end
+
+    -- Scattering burst of neon parts (opening) or implosion (closing).
+    local function burst(center, count, inward)
         for _ = 1, (count or 12) do
             task.spawn(function()
-                local p = Instance.new("Part")
-                p.Size = Vector3.new(0.25, 0.25, 0.25)
-                p.Shape = Enum.PartType.Ball
-                p.Anchored = true
-                p.CanCollide = false
-                p.Material = Enum.Material.Neon
-                p.Color = GLOW
+                local p = spawnBall(RNG:NextNumber(0.18, 0.32))
                 p.CFrame = center * CFrame.new(
-                    RNG:NextNumber(-1.4, 1.4),
-                    RNG:NextNumber(-1.8, 1.8),
+                    RNG:NextNumber(-2.5, 2.5),
+                    RNG:NextNumber(-3, 3),
+                    RNG:NextNumber(-0.4, 0.4)
+                )
+                local target = center.Position
+                local dir
+                if inward then
+                    dir = (target - p.Position).Unit
+                else
+                    dir = Vector3.new(
+                        RNG:NextNumber(-1, 1),
+                        RNG:NextNumber(-0.3, 1),
+                        RNG:NextNumber(-0.5, 0.5)
+                    ).Unit
+                end
+                local step = inward and 0.35 or 0.26
+                local t = 0
+                while t < 1.15 and p.Parent do
+                    t = t + 0.05
+                    p.CFrame = p.CFrame * CFrame.new(dir * step)
+                    p.Transparency = math.min(1, t / 1.15)
+                    task.wait(0.05)
+                end
+                if p.Parent then p:Destroy() end
+            end)
+        end
+    end
+
+    -- Sparks that orbit the portal while it is open.
+    local function orbit(center)
+        task.spawn(function()
+            local orbiters = {}
+            for i = 1, 10 do
+                orbiters[i] = {
+                    part = spawnBall(0.28),
+                    phase = (i - 1) / 10 * math.pi * 2,
+                    radius = RNG:NextNumber(4.6, 6.4),
+                    height = RNG:NextNumber(-3.2, 3.2),
+                    speed = RNG:NextNumber(1.5, 2.5),
+                }
+            end
+            local t = 0
+            while t < 2.8 and orbiters[1].part.Parent do
+                t = t + 0.05
+                for _, o in ipairs(orbiters) do
+                    if o.part.Parent then
+                        local a = o.phase + t * o.speed
+                        o.part.CFrame = CFrame.new(center.Position + Vector3.new(
+                            math.cos(a) * o.radius,
+                            o.height,
+                            math.sin(a) * o.radius
+                        ))
+                        o.part.Transparency = math.min(1, o.part.Transparency + 0.02)
+                    end
+                end
+                task.wait(0.05)
+            end
+            for _, o in ipairs(orbiters) do
+                if o.part.Parent then o.part:Destroy() end
+            end
+        end)
+    end
+
+    -- Embers rising from the base of the portal.
+    local function embers(center)
+        for _ = 1, 7 do
+            task.spawn(function()
+                local p = spawnBall(RNG:NextNumber(0.16, 0.26))
+                p.CFrame = center * CFrame.new(
+                    RNG:NextNumber(-2.4, 2.4),
+                    -4,
                     RNG:NextNumber(-0.3, 0.3)
                 )
-                p.Parent = workspace
-                local dir = Vector3.new(
-                    RNG:NextNumber(-1, 1),
-                    RNG:NextNumber(-0.4, 1),
-                    RNG:NextNumber(-0.5, 0.5)
-                ).Unit
+                local rise = RNG:NextNumber(0.12, 0.22)
                 local t = 0
-                while t < 1.1 and p.Parent do
-                    t = t + 0.05
-                    p.CFrame = p.CFrame * CFrame.new(dir * 0.25)
-                    p.Transparency = math.min(1, t / 1.1)
-                    task.wait(0.05)
+                while t < 1.5 and p.Parent do
+                    t = t + 0.04
+                    p.CFrame = p.CFrame * CFrame.new(0, rise, 0)
+                    p.Transparency = math.min(1, 0.15 + t / 1.5)
+                    task.wait(0.04)
                 end
                 if p.Parent then p:Destroy() end
             end)
@@ -3076,6 +3160,35 @@ Portal = (function()
         end)
     end
 
+    -- Ambient life while the portal is open: tumble + in-plane spin,
+    -- breathing glow, decal shimmer and periodic embers.
+    local function ambient(face, glow, decalFront, center)
+        task.spawn(function()
+            local t = 0
+            local nextEmbers = 0.4
+            while face.Parent do
+                if config.Animations then
+                    t = t + 0.05
+                    -- Changed rotation axes: rolls over its horizontal axis
+                    -- and spins in-plane instead of a single vertical turn.
+                    face.CFrame = face.CFrame * CFrame.Angles(math.rad(3.2), 0, math.rad(1.4))
+                    if glow.Parent then
+                        glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
+                    end
+                    if decalFront.Parent then
+                        decalFront.Transparency = 0.06 + math.sin(t * 5) * 0.06
+                    end
+                    nextEmbers = nextEmbers - 0.05
+                    if nextEmbers <= 0 then
+                        nextEmbers = RNG:NextNumber(0.6, 1.2)
+                        embers(center)
+                    end
+                end
+                task.wait(0.05)
+            end
+        end)
+    end
+
     local function openPortal(cf, quiet)
         cleanup()
         local face = Instance.new("Part")
@@ -3085,25 +3198,24 @@ Portal = (function()
         face.CanCollide = false
         face.CanQuery = false
         face.Material = Enum.Material.Plastic
-        face.Color = Color3.fromRGB(210, 255, 210)
-        face.Transparency = 0
+        face.Transparency = 1
         face.CFrame = cf
         face.Parent = workspace
         lastPortal = face
 
-        local decal = Instance.new("Decal")
-        decal.Name = "PortalImage"
-        decal.Texture = IMG
-        decal.Face = Enum.NormalId.Front
-        decal.Transparency = 0
-        decal.Parent = face
+        local decalFront = Instance.new("Decal")
+        decalFront.Name = "PortalImage"
+        decalFront.Texture = IMG
+        decalFront.Face = Enum.NormalId.Front
+        decalFront.Transparency = 0
+        decalFront.Parent = face
 
-        local backDecal = Instance.new("Decal")
-        backDecal.Name = "PortalImageBack"
-        backDecal.Texture = IMG
-        backDecal.Face = Enum.NormalId.Back
-        backDecal.Transparency = 0
-        backDecal.Parent = face
+        local decalBack = Instance.new("Decal")
+        decalBack.Name = "PortalImageBack"
+        decalBack.Texture = IMG
+        decalBack.Face = Enum.NormalId.Back
+        decalBack.Transparency = 0
+        decalBack.Parent = face
 
         local glow = Instance.new("PointLight")
         glow.Color = GLOW
@@ -3112,7 +3224,7 @@ Portal = (function()
         glow.Parent = face
 
         local halo = Instance.new("PointLight")
-        halo.Color = Color3.fromRGB(90, 255, 160)
+        halo.Color = GLOW_SOFT
         halo.Brightness = 1.5
         halo.Range = 30
         halo.Parent = face
@@ -3121,21 +3233,16 @@ Portal = (function()
             playSound(OPEN_SOUND, 1, face)
             burst(cf, 16)
             flash(cf)
+            orbit(cf)
         end
 
+        -- Opening animation: grow from a point while rolling on its side.
         tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
             Size = Vector3.new(5, 8, 0.3),
         })
-        task.spawn(function()
-            local spin = 0
-            while face.Parent and spin < 0.95 do
-                face.CFrame = face.CFrame * CFrame.Angles(0, math.rad(6), 0)
-                spin = spin + 0.05
-                task.wait(0.05)
-            end
-        end)
 
-        -- Safety net: a portal never lingers for more than a few seconds.
+        ambient(face, glow, decalFront, cf)
+
         task.delay(12, function()
             if face == lastPortal and face.Parent then
                 face:Destroy()
@@ -3146,13 +3253,13 @@ Portal = (function()
         return face
     end
 
+    -- Closing: particles implode, the image fades and the plate collapses.
     local function closePortal(face)
         if not face or not face.Parent then return end
         playSound(CLOSE_SOUND, 1, face)
-        burst(face.CFrame, 10)
+        burst(face.CFrame, 14, true)
         tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
             Size = Vector3.new(0.3, 0.3, 0.3),
-            Transparency = 1,
         })
         for _, child in ipairs(face:GetChildren()) do
             if child:IsA("Decal") then
@@ -3167,7 +3274,18 @@ Portal = (function()
         end)
     end
 
-    -- Pre-teleport sequence: open in front of the player, wait for entry.
+    -- Walks the character into the portal so the hop never depends on
+    -- the player moving manually.
+    local function autoWalk(portalPos)
+        local hum = humanoid()
+        if not hum or hum.Health <= 0 then return end
+        pcall(function()
+            hum.Sit = false
+            hum.WalkSpeed = math.max(tonumber(hum.WalkSpeed) or 16, 16)
+            hum:MoveTo(portalPos)
+        end)
+    end
+
     local function gate(token)
         if currentTheme ~= "RICK AND MORTY" then return end
         local base = Vector3.new(0, 12, 0)
@@ -3184,10 +3302,31 @@ Portal = (function()
         notify("Portal open — step inside to jump", GLOW)
         local openedAt = os.clock()
         local entered = false
+        local walking = false
+        local stuckPos = nil
+        local stuckAt = 0
+        local lastMoveAt = 0
         if config.PortalGate then
             while hopStillActive(token) and (os.clock() - openedAt) < ENTRY_TIMEOUT do
                 sessionStats.lastHopStart = os.clock()
                 local rp = root()
+                -- Auto-walk assist so the character enters on its own.
+                if not entered and not walking and (os.clock() - openedAt) >= AUTO_WALK_DELAY then
+                    walking = true
+                    stuckPos = rp and rp.Position or nil
+                    stuckAt = os.clock()
+                    lastMoveAt = os.clock()
+                    setStatus("portal open — walking in")
+                    autoWalk(pos)
+                end
+                if walking and rp and (os.clock() - lastMoveAt) > 0.5 then
+                    lastMoveAt = os.clock()
+                    autoWalk(pos)
+                    if stuckPos and (rp.Position - stuckPos).Magnitude < 0.8 and (os.clock() - stuckAt) > 4 then
+                        -- Character is wedged; release control and jump anyway.
+                        break
+                    end
+                end
                 if rp and (rp.Position - pos).Magnitude < ENTER_RADIUS then
                     entered = true
                     break
@@ -3198,6 +3337,11 @@ Portal = (function()
         if entered then
             setStatus("portal entered — teleporting")
             notify("Portal entered!", GLOW)
+            local last = lastPortal
+            if last and last.Parent then
+                flash(last.CFrame)
+                burst(last.CFrame, 10)
+            end
         end
         local wait = MIN_OPEN - (os.clock() - openedAt)
         while wait > 0 and hopStillActive(token) do
@@ -3219,6 +3363,7 @@ Portal = (function()
         local pos = base + behind * 5 + Vector3.new(0, 1.4, 0)
         local cf = CFrame.new(pos, pos + behind)
         local face = openPortal(cf, true)
+        orbit(cf)
         task.delay(1.6, function()
             closePortal(face)
         end)
