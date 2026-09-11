@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.10"
+local VERSION = "2.11"
 
 local guiAlive = true
 local isHopping = false
@@ -278,13 +278,14 @@ end
 -- Theme palette table. Defined before loadSettings so normalizeSettings
 -- can validate the persisted theme name against it.
 local THEMES = {
-    ["SNOW"] = Color3.fromRGB(255, 255, 255),
-    ["TERMINAL GREEN"] = Color3.fromRGB(120, 255, 160),
-    ["AMBER"] = Color3.fromRGB(255, 178, 80),
-    ["CYAN"] = Color3.fromRGB(90, 220, 255),
-    ["MAGENTA"] = Color3.fromRGB(255, 110, 235),
-    ["RED"] = Color3.fromRGB(255, 95, 95),
-    ["BLUE"] = Color3.fromRGB(110, 150, 255),
+    ["SNOW"] = { ink = Color3.fromRGB(255, 255, 255), bg = Color3.fromRGB(0, 0, 0) },
+    ["TERMINAL GREEN"] = { ink = Color3.fromRGB(120, 255, 160), bg = Color3.fromRGB(0, 0, 0) },
+    ["AMBER"] = { ink = Color3.fromRGB(255, 178, 80), bg = Color3.fromRGB(0, 0, 0) },
+    ["CYAN"] = { ink = Color3.fromRGB(90, 220, 255), bg = Color3.fromRGB(0, 0, 0) },
+    ["MAGENTA"] = { ink = Color3.fromRGB(255, 110, 235), bg = Color3.fromRGB(0, 0, 0) },
+    ["RED"] = { ink = Color3.fromRGB(255, 95, 95), bg = Color3.fromRGB(0, 0, 0) },
+    ["BLUE"] = { ink = Color3.fromRGB(110, 150, 255), bg = Color3.fromRGB(0, 0, 0) },
+    ["RICK AND MORTY"] = { ink = Color3.fromRGB(163, 255, 71), bg = Color3.fromRGB(8, 22, 12) },
 }
 
 local defaultSettings = {
@@ -301,6 +302,7 @@ local defaultSettings = {
     MinRegionPercent = 35,
     Animations = true,
     AntiAfk = true,
+    PortalGate = true,
     Theme = "SNOW",
     MainX = -170,
     MainY = -270,
@@ -332,7 +334,7 @@ local function finiteNumber(value, fallback)
 end
 
 local function normalizeSettings(cfg)
-    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations", "AntiAfk", "Welcomed" }) do
+    for _, key in ipairs({ "AutoHop", "FilterDonators", "FilterChat", "Animations", "AntiAfk", "PortalGate", "Welcomed" }) do
         if type(cfg[key]) ~= "boolean" then
             cfg[key] = defaultSettings[key]
         end
@@ -528,7 +530,15 @@ local currentTheme = (THEMES[config.Theme] and config.Theme) or "SNOW"
 
 -- Live accent colour; all bright text/outlines read from here.
 local function P()
-    return THEMES[currentTheme]
+    local theme = THEMES[currentTheme]
+    return theme and theme.ink or WHITE
+end
+
+-- Live panel colour; the RICK AND MORTY theme tints every panel a dark
+-- portal-gun green instead of pure black. Other themes keep pure black.
+local function BG()
+    local theme = THEMES[currentTheme]
+    return theme and theme.bg or BLACK
 end
 
 -- Numeric colour comparison: robust even on executors where Color3 ==
@@ -543,12 +553,16 @@ end
 -- Direct assignment makes the switch reliable and cheap (no tween
 -- dependency, no half-morphed frames).
 local function applyTheme(name, persist)
-    local ink = THEMES[name]
-    if not ink then
+    local theme = THEMES[name]
+    if not theme then
         return
     end
-    local from = THEMES[currentTheme]
-    if sameColor(ink, from) then
+    local ink = theme.ink
+    local bg = theme.bg or BLACK
+    local old = THEMES[currentTheme] or THEMES["SNOW"]
+    local fromInk = old.ink
+    local fromBg = old.bg or BLACK
+    if sameColor(ink, fromInk) and sameColor(bg, fromBg) then
         currentTheme = name
         return
     end
@@ -560,19 +574,22 @@ local function applyTheme(name, persist)
     pcall(function()
         for _, instance in ipairs(ScreenGui:GetDescendants()) do
             if instance:IsA("GuiObject") then
-                if sameColor(instance.BorderColor3, from) then
+                if sameColor(instance.BorderColor3, fromInk) then
                     instance.BorderColor3 = ink
                 end
-                if sameColor(instance.BackgroundColor3, from) then
+                if sameColor(instance.BackgroundColor3, fromInk) then
                     instance.BackgroundColor3 = ink
                 end
+                if sameColor(instance.BackgroundColor3, fromBg) then
+                    instance.BackgroundColor3 = bg
+                end
                 if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-                    if sameColor(instance.TextColor3, from) then
+                    if sameColor(instance.TextColor3, fromInk) then
                         instance.TextColor3 = ink
                     end
                 end
                 if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-                    if sameColor(instance.ImageColor3, from) then
+                    if sameColor(instance.ImageColor3, fromInk) then
                         instance.ImageColor3 = ink
                     end
                 end
@@ -985,7 +1002,7 @@ local function createWindow(opts)
     win.Name = opts.Name
     win.Size = opts.Size
     win.Position = opts.Position
-    win.BackgroundColor3 = BLACK
+    win.BackgroundColor3 = BG()
     win.BorderSizePixel = 1
     win.BorderColor3 = P()
     win.Active = true
@@ -1019,7 +1036,7 @@ local function createWindow(opts)
     local close = Instance.new("TextButton")
     close.Size = UDim2.new(0, 20, 0, 20)
     close.Position = UDim2.new(1, -25, 0, 5)
-    close.BackgroundColor3 = BLACK
+    close.BackgroundColor3 = BG()
     close.BorderSizePixel = 1
     close.BorderColor3 = P()
     close.Text = "X"
@@ -1130,7 +1147,7 @@ local Main = Instance.new("Frame")
 Main.Name = "Main"
 Main.Size = EXPANDED_SIZE
 Main.Position = UDim2.new(0.5, config.MainX, 0.5, config.MainY)
-Main.BackgroundColor3 = BLACK
+Main.BackgroundColor3 = BG()
 Main.BorderSizePixel = 1
 Main.BorderColor3 = P()
 Main.Active = true
@@ -1214,7 +1231,7 @@ local function makeHeaderButton(text, xOffset)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(0, 20, 0, 20)
     btn.Position = UDim2.new(1, xOffset, 0, 5)
-    btn.BackgroundColor3 = BLACK
+    btn.BackgroundColor3 = BG()
     btn.BorderSizePixel = 1
     btn.BorderColor3 = P()
     btn.Text = text
@@ -1327,7 +1344,7 @@ local function createToggle(parent, text, pos, size, key)
     local btn = Instance.new("TextButton")
     btn.Size = size
     btn.Position = pos
-    btn.BackgroundColor3 = BLACK
+    btn.BackgroundColor3 = BG()
     btn.BorderSizePixel = 1
     btn.BorderColor3 = P()
     btn.Font = Enum.Font.Code
@@ -1358,7 +1375,7 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
     local frame = Instance.new("Frame")
     frame.Size = size
     frame.Position = pos
-    frame.BackgroundColor3 = BLACK
+    frame.BackgroundColor3 = BG()
     frame.BorderSizePixel = 1
     frame.BorderColor3 = P()
     frame.Parent = parent
@@ -1385,7 +1402,7 @@ local function createStepper(parent, label, pos, size, key, minValue, maxValue, 
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(0, 20, 0, 18)
         btn.Position = UDim2.new(1, dx, 0.5, -9)
-        btn.BackgroundColor3 = BLACK
+        btn.BackgroundColor3 = BG()
         btn.BorderSizePixel = 1
         btn.BorderColor3 = P()
         btn.Text = symbol
@@ -1423,7 +1440,7 @@ local function createSelector(parent, label, pos, size, key, values, labels)
     local btn = Instance.new("TextButton")
     btn.Size = size
     btn.Position = pos
-    btn.BackgroundColor3 = BLACK
+    btn.BackgroundColor3 = BG()
     btn.BorderSizePixel = 1
     btn.BorderColor3 = P()
     btn.Font = Enum.Font.Code
@@ -1480,7 +1497,7 @@ local InfoWin = createWindow({
 local InfoScroll = Instance.new("ScrollingFrame")
 InfoScroll.Size = UDim2.new(1, -16, 1, -16)
 InfoScroll.Position = UDim2.new(0, 8, 0, 8)
-InfoScroll.BackgroundColor3 = BLACK
+InfoScroll.BackgroundColor3 = BG()
 InfoScroll.BorderSizePixel = 1
 InfoScroll.BorderColor3 = P()
 InfoScroll.ScrollBarThickness = 4
@@ -1501,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.10
+> SERVER FINDER v2.11
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1567,9 +1584,9 @@ InfoTextLabel.Text = [[
 10. THEMES
    Cycle the terminal accent from Settings:
    SNOW (default), TERMINAL GREEN, AMBER, CYAN,
-   MAGENTA, RED and BLUE. Only the main accent
-   changes; hints stay neutral. The choice is
-   saved and survives server hops.
+   MAGENTA, RED, BLUE and RICK AND MORTY. The
+   accent (plus R&M portal-gun panels) is saved
+   and survives server hops.
 
 11. AUTO-LOOP STOP RULES
    The loop stops only when every ACTIVE filter
@@ -1593,6 +1610,15 @@ InfoTextLabel.Text = [[
    never disconnected for standing still. Toggle
    in Settings (default ON).
 
+15. RICK AND MORTY PORTAL
+   Pick the RICK AND MORTY theme for the portal
+   gun look. Three seconds before a teleport a
+   green portal opens in front of you (sound,
+   green flash, glow and a burst of neon parts).
+   Walk into it to jump; on the new server a
+   closing portal appears behind you and seals
+   itself. No shockwave rings are used.
+
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
 
@@ -1610,7 +1636,7 @@ SettingsScroll.BackgroundTransparency = 1
 SettingsScroll.BorderSizePixel = 0
 SettingsScroll.ScrollBarThickness = 3
 SettingsScroll.ScrollBarImageColor3 = P()
-SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 652)
+SettingsScroll.CanvasSize = UDim2.new(0, 0, 0, 700)
 SettingsScroll.Parent = SettingsWin.Body
 
 createToggle(SettingsScroll, "DONATORS", UDim2.new(0, 6, 0, 6), UDim2.new(1, -16, 0, 26), "FilterDonators")
@@ -1649,10 +1675,13 @@ hint(SettingsScroll, "disable for the lightest possible GUI", UDim2.new(0, 6, 0,
 createToggle(SettingsScroll, "ANTI AFK", UDim2.new(0, 6, 0, 518), UDim2.new(1, -16, 0, 26), "AntiAfk")
 hint(SettingsScroll, "auto-reset idle so you can walk away while it works", UDim2.new(0, 6, 0, 546))
 
+createToggle(SettingsScroll, "PORTAL GATE", UDim2.new(0, 6, 0, 570), UDim2.new(1, -16, 0, 26), "PortalGate")
+hint(SettingsScroll, "R&M theme: walk into the portal to teleport", UDim2.new(0, 6, 0, 598))
+
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
-ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 570)
-ThemeSelectorBtn.BackgroundColor3 = BLACK
+ThemeSelectorBtn.Position = UDim2.new(0, 6, 0, 622)
+ThemeSelectorBtn.BackgroundColor3 = BG()
 ThemeSelectorBtn.BorderSizePixel = 1
 ThemeSelectorBtn.BorderColor3 = P()
 ThemeSelectorBtn.Font = Enum.Font.Code
@@ -1671,18 +1700,18 @@ table.insert(settingRefreshers, refreshTheme)
 refreshTheme()
 
 ThemeSelectorBtn.MouseButton1Click:Connect(function()
-    local order = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA", "RED", "BLUE" }
+    local order = { "SNOW", "TERMINAL GREEN", "AMBER", "CYAN", "MAGENTA", "RED", "BLUE", "RICK AND MORTY" }
     local index = table.find(order, currentTheme) or 1
     applyTheme(order[(index % #order) + 1])
     refreshTheme()
     confirmBlink(ThemeSelectorBtn)
 end)
-hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 598))
+hint(SettingsScroll, "cycle the terminal accent colour", UDim2.new(0, 6, 0, 650))
 
 local ClearHistoryBtn = Instance.new("TextButton")
 ClearHistoryBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 618)
-ClearHistoryBtn.BackgroundColor3 = BLACK
+ClearHistoryBtn.Position = UDim2.new(0, 6, 0, 670)
+ClearHistoryBtn.BackgroundColor3 = BG()
 ClearHistoryBtn.BorderSizePixel = 1
 ClearHistoryBtn.BorderColor3 = P()
 ClearHistoryBtn.Font = Enum.Font.Code
@@ -1695,8 +1724,8 @@ setupRetroButton(ClearHistoryBtn)
 
 local ResetSettingsBtn = Instance.new("TextButton")
 ResetSettingsBtn.Size = UDim2.new(0.5, -10, 0, 30)
-ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 618)
-ResetSettingsBtn.BackgroundColor3 = BLACK
+ResetSettingsBtn.Position = UDim2.new(0.5, 4, 0, 670)
+ResetSettingsBtn.BackgroundColor3 = BG()
 ResetSettingsBtn.BorderSizePixel = 1
 ResetSettingsBtn.BorderColor3 = P()
 ResetSettingsBtn.Font = Enum.Font.Code
@@ -1779,7 +1808,7 @@ Stats.Parent = Body
 local Scroll = Instance.new("ScrollingFrame")
 Scroll.Size = UDim2.new(1, -16, 1, -112)
 Scroll.Position = UDim2.new(0, 8, 0, 28)
-Scroll.BackgroundColor3 = BLACK
+Scroll.BackgroundColor3 = BG()
 Scroll.BorderSizePixel = 1
 Scroll.BorderColor3 = P()
 Scroll.ScrollBarThickness = 4
@@ -1880,7 +1909,7 @@ Status.Parent = Body
 local HopOnceBtn = Instance.new("TextButton")
 HopOnceBtn.Size = UDim2.new(0.46, 0, 0, 32)
 HopOnceBtn.Position = UDim2.new(0, 8, 1, -48)
-HopOnceBtn.BackgroundColor3 = BLACK
+HopOnceBtn.BackgroundColor3 = BG()
 HopOnceBtn.BorderSizePixel = 1
 HopOnceBtn.BorderColor3 = P()
 HopOnceBtn.Font = Enum.Font.Code
@@ -1894,7 +1923,7 @@ setupRetroButton(HopOnceBtn)
 local SearchBtn = Instance.new("TextButton")
 SearchBtn.Size = UDim2.new(0.46, -8, 0, 32)
 SearchBtn.Position = UDim2.new(0.52, 0, 1, -48)
-SearchBtn.BackgroundColor3 = BLACK
+SearchBtn.BackgroundColor3 = BG()
 SearchBtn.BorderSizePixel = 1
 SearchBtn.BorderColor3 = P()
 SearchBtn.Font = Enum.Font.Code
@@ -1947,7 +1976,7 @@ notify = function(message, color)
     local toast = Instance.new("TextLabel")
     toast.Size = UDim2.new(1, 0, 1, 0)
     toast.Position = config.Animations and UDim2.new(1.1, 0, 0, 0) or UDim2.new(0, 0, 0, 0)
-    toast.BackgroundColor3 = BLACK
+    toast.BackgroundColor3 = BG()
     toast.BackgroundTransparency = 0.08
     toast.BorderSizePixel = 1
     toast.BorderColor3 = accent
@@ -2167,7 +2196,7 @@ local function buildCard(pl)
     local card = Instance.new("Frame")
     card.Name = "P_" .. tostring(pl.UserId)
     card.Size = UDim2.new(1, -6, 0, 34)
-    card.BackgroundColor3 = BLACK
+    card.BackgroundColor3 = BG()
     card.BackgroundTransparency = config.Animations and 1 or 0
     card.BorderSizePixel = 1
     card.BorderColor3 = config.Animations and MUTED or P()
@@ -2181,7 +2210,7 @@ local function buildCard(pl)
     local avatar = Instance.new("ImageLabel")
     avatar.Size = UDim2.new(0, 26, 0, 26)
     avatar.Position = UDim2.new(0, 4, 0.5, -13)
-    avatar.BackgroundColor3 = BLACK
+    avatar.BackgroundColor3 = BG()
     avatar.BorderSizePixel = 1
     avatar.BorderColor3 = P()
     avatar.ImageTransparency = config.Animations and 1 or 0
@@ -2230,7 +2259,7 @@ local function buildCard(pl)
     end)
     card.MouseLeave:Connect(function()
         if card.Parent then
-            tween(card, TweenInfo.new(0.16, Enum.EasingStyle.Quad), { BackgroundColor3 = BLACK })
+            tween(card, TweenInfo.new(0.16, Enum.EasingStyle.Quad), { BackgroundColor3 = BG() })
             tween(info, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
                 Position = UDim2.new(0, 36, 0, 0),
             })
@@ -2703,6 +2732,7 @@ local function startSearchSpinner(token)
     end)
 end
 
+local Portal
 local executeHop
 local queueWarningShown = false
 local queuePrepared = false
@@ -2733,6 +2763,7 @@ end
 
 local function failHop(token, message, serverId)
     if token ~= hopToken then return end
+    if Portal then Portal.cleanup() end
     markServerFailed(serverId)
     isHopping = false
     sessionStats.failures = sessionStats.failures + 1
@@ -2860,6 +2891,24 @@ executeHop = function()
         end)
     end
 
+    -- Rick and Morty: open the portal three seconds before the jump and
+    -- (with PORTAL GATE on) wait for the player to walk through it.
+    if Portal then
+        Portal.gate(token)
+    end
+    if not hopStillActive(token) then
+        if Portal then Portal.cleanup() end
+        return
+    end
+    sessionStats.lastHopStart = os.clock()
+
+    -- Leave a marker so the next server seals a closing portal behind us.
+    if currentTheme == "RICK AND MORTY" and type(writefile) == "function" then
+        pcall(function()
+            writefile("ServerFinderPortal.json", HttpService:JSONEncode({ ts = os.time() }))
+        end)
+    end
+
     local ok, teleportError = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
     end)
@@ -2903,6 +2952,284 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+
+-- ============================================================
+-- RICK AND MORTY PORTAL (v2.11)
+-- A 3D portal built from Parts. Opens in front of the player three
+-- seconds before a teleport (open sound, green flash, PointLight glow
+-- and a burst of neon part-particles), optionally waits for the player
+-- to walk inside, then jumps. On arrival a portal spawns behind the
+-- player and seals itself (close sound). No shockwave rings.
+-- ============================================================
+Portal = (function()
+    local IMG = "rbxassetid://104310499688141"
+    local OPEN_SOUND = "rbxassetid://1013378689"
+    local CLOSE_SOUND = "rbxassetid://79092478163364"
+    local GLOW = Color3.fromRGB(140, 255, 96)
+    local ENTER_RADIUS = 4
+    local ENTRY_TIMEOUT = 20
+    local MIN_OPEN = 3
+
+    local lastPortal = nil
+
+    local function cleanup()
+        if lastPortal and lastPortal.Parent then
+            pcall(function() lastPortal:Destroy() end)
+        end
+        lastPortal = nil
+    end
+
+    local function playSound(id, volume, parent)
+        pcall(function()
+            local s = Instance.new("Sound")
+            s.SoundId = id
+            s.Volume = volume or 1
+            s.Parent = parent or workspace
+            s:Play()
+            task.delay(6, function()
+                if s.Parent then s:Destroy() end
+            end)
+        end)
+    end
+
+    local function root()
+        local c = LocalPlayer.Character
+        if not c then return nil end
+        local hrp = c:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp end
+        local hum = c:FindFirstChildOfClass("Humanoid")
+        if hum and hum.RootPart then return hum.RootPart end
+        return nil
+    end
+
+    local function forwardVector()
+        local look = Vector3.new(0, 0, -1)
+        local cam = workspace.CurrentCamera
+        if cam then
+            pcall(function() look = cam.CFrame.LookVector end)
+        end
+        look = Vector3.new(look.X, 0, look.Z)
+        if look.Magnitude < 0.05 then look = Vector3.new(0, 0, -1) end
+        return look.Unit
+    end
+
+    -- Burst of small neon parts that scatter, fade and vanish.
+    local function burst(center, count)
+        for _ = 1, (count or 12) do
+            task.spawn(function()
+                local p = Instance.new("Part")
+                p.Size = Vector3.new(0.25, 0.25, 0.25)
+                p.Shape = Enum.PartType.Ball
+                p.Anchored = true
+                p.CanCollide = false
+                p.Material = Enum.Material.Neon
+                p.Color = GLOW
+                p.CFrame = center * CFrame.new(
+                    RNG:NextNumber(-1.4, 1.4),
+                    RNG:NextNumber(-1.8, 1.8),
+                    RNG:NextNumber(-0.3, 0.3)
+                )
+                p.Parent = workspace
+                local dir = Vector3.new(
+                    RNG:NextNumber(-1, 1),
+                    RNG:NextNumber(-0.4, 1),
+                    RNG:NextNumber(-0.5, 0.5)
+                ).Unit
+                local t = 0
+                while t < 1.1 and p.Parent do
+                    t = t + 0.05
+                    p.CFrame = p.CFrame * CFrame.new(dir * 0.25)
+                    p.Transparency = math.min(1, t / 1.1)
+                    task.wait(0.05)
+                end
+                if p.Parent then p:Destroy() end
+            end)
+        end
+    end
+
+    -- Big glowing plate that flares bright green and fades out.
+    local function flash(center)
+        task.spawn(function()
+            local plate = Instance.new("Part")
+            plate.Size = Vector3.new(11, 11, 0.3)
+            plate.Anchored = true
+            plate.CanCollide = false
+            plate.Material = Enum.Material.Neon
+            plate.Color = GLOW
+            plate.Transparency = 1
+            plate.CFrame = center
+            plate.Parent = workspace
+            local light = Instance.new("PointLight")
+            light.Color = GLOW
+            light.Brightness = 0
+            light.Range = 18
+            light.Parent = plate
+            local t = 0
+            while t < 0.55 and plate.Parent do
+                t = t + 0.03
+                local a = math.clamp(1 - math.abs(t - 0.22) / 0.22, 0, 1)
+                plate.Transparency = 1 - a * 0.85
+                light.Brightness = a * 6
+                task.wait(0.03)
+            end
+            if plate.Parent then plate:Destroy() end
+        end)
+    end
+
+    local function openPortal(cf, quiet)
+        cleanup()
+        local face = Instance.new("Part")
+        face.Name = "SF_Portal"
+        face.Size = Vector3.new(0.3, 0.3, 0.3)
+        face.Anchored = true
+        face.CanCollide = false
+        face.CanQuery = false
+        face.Material = Enum.Material.Plastic
+        face.Color = Color3.fromRGB(210, 255, 210)
+        face.Transparency = 0
+        face.CFrame = cf
+        face.Parent = workspace
+        lastPortal = face
+
+        local decal = Instance.new("Decal")
+        decal.Name = "PortalImage"
+        decal.Texture = IMG
+        decal.Face = Enum.NormalId.Front
+        decal.Transparency = 0
+        decal.Parent = face
+
+        local backDecal = Instance.new("Decal")
+        backDecal.Name = "PortalImageBack"
+        backDecal.Texture = IMG
+        backDecal.Face = Enum.NormalId.Back
+        backDecal.Transparency = 0
+        backDecal.Parent = face
+
+        local glow = Instance.new("PointLight")
+        glow.Color = GLOW
+        glow.Brightness = 4
+        glow.Range = 16
+        glow.Parent = face
+
+        local halo = Instance.new("PointLight")
+        halo.Color = Color3.fromRGB(90, 255, 160)
+        halo.Brightness = 1.5
+        halo.Range = 30
+        halo.Parent = face
+
+        if not quiet then
+            playSound(OPEN_SOUND, 1, face)
+            burst(cf, 16)
+            flash(cf)
+        end
+
+        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = Vector3.new(5, 8, 0.3),
+        })
+        task.spawn(function()
+            local spin = 0
+            while face.Parent and spin < 0.95 do
+                face.CFrame = face.CFrame * CFrame.Angles(0, math.rad(6), 0)
+                spin = spin + 0.05
+                task.wait(0.05)
+            end
+        end)
+
+        -- Safety net: a portal never lingers for more than a few seconds.
+        task.delay(12, function()
+            if face == lastPortal and face.Parent then
+                face:Destroy()
+                lastPortal = nil
+            end
+        end)
+
+        return face
+    end
+
+    local function closePortal(face)
+        if not face or not face.Parent then return end
+        playSound(CLOSE_SOUND, 1, face)
+        burst(face.CFrame, 10)
+        tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = Vector3.new(0.3, 0.3, 0.3),
+            Transparency = 1,
+        })
+        for _, child in ipairs(face:GetChildren()) do
+            if child:IsA("Decal") then
+                tween(child, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                    Transparency = 1,
+                })
+            end
+        end
+        task.delay(0.75, function()
+            if face.Parent then face:Destroy() end
+            if face == lastPortal then lastPortal = nil end
+        end)
+    end
+
+    -- Pre-teleport sequence: open in front of the player, wait for entry.
+    local function gate(token)
+        if currentTheme ~= "RICK AND MORTY" then return end
+        local base = Vector3.new(0, 12, 0)
+        local r = root()
+        if r then base = r.Position end
+        if not r and workspace.CurrentCamera then
+            base = workspace.CurrentCamera.CFrame.Position
+        end
+        local fwd = forwardVector()
+        local pos = base + fwd * 7 + Vector3.new(0, 1.3, 0)
+        local cf = CFrame.new(pos, pos + fwd)
+        openPortal(cf)
+        setStatus("portal open — walk into it")
+        notify("Portal open — step inside to jump", GLOW)
+        local openedAt = os.clock()
+        local entered = false
+        if config.PortalGate then
+            while hopStillActive(token) and (os.clock() - openedAt) < ENTRY_TIMEOUT do
+                sessionStats.lastHopStart = os.clock()
+                local rp = root()
+                if rp and (rp.Position - pos).Magnitude < ENTER_RADIUS then
+                    entered = true
+                    break
+                end
+                task.wait(0.12)
+            end
+        end
+        if entered then
+            setStatus("portal entered — teleporting")
+            notify("Portal entered!", GLOW)
+        end
+        local wait = MIN_OPEN - (os.clock() - openedAt)
+        while wait > 0 and hopStillActive(token) do
+            sessionStats.lastHopStart = os.clock()
+            task.wait(0.1)
+            wait = wait - 0.1
+        end
+        if not hopStillActive(token) then
+            cleanup()
+        end
+    end
+
+    -- Arrival: portal behind the player that seals itself.
+    local function sealBehind()
+        local base = Vector3.new(0, 12, 0)
+        local r = root()
+        if r then base = r.Position end
+        local behind = -forwardVector()
+        local pos = base + behind * 5 + Vector3.new(0, 1.4, 0)
+        local cf = CFrame.new(pos, pos + behind)
+        local face = openPortal(cf, true)
+        task.delay(1.6, function()
+            closePortal(face)
+        end)
+    end
+
+    return {
+        cleanup = cleanup,
+        gate = gate,
+        sealBehind = sealBehind,
+    }
+end)()
 
 local function countDonators()
     local n = 0
@@ -3215,6 +3542,28 @@ task.spawn(function()
         task.wait(120)
         if guiAlive and config.AntiAfk then
             pokeInput()
+        end
+    end
+end)
+
+-- If we just landed through a portal hop, seal a closing portal behind
+-- the player (Rick and Morty theme), then clear the arrival marker.
+task.spawn(function()
+    if currentTheme ~= "RICK AND MORTY" or not canReadFile("ServerFinderPortal.json") then
+        return
+    end
+    local stale = true
+    pcall(function()
+        local data = HttpService:JSONDecode(readfile("ServerFinderPortal.json"))
+        if type(data) == "table" and (os.time() - (tonumber(data.ts) or 0)) <= 60 then
+            stale = false
+        end
+    end)
+    pcall(function() writefile("ServerFinderPortal.json", "") end)
+    if not stale then
+        task.wait(1)
+        if guiAlive and Portal then
+            Portal.sealBehind()
         end
     end
 end)
