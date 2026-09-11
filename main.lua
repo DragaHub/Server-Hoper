@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.13"
+local VERSION = "2.16"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.13
+> SERVER FINDER v2.16
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1613,20 +1613,21 @@ InfoTextLabel.Text = [[
 15. RICK AND MORTY PORTAL
    Pick the RICK AND MORTY theme for the portal
    gun look. Three seconds before a teleport a
-   green portal opens in front of you. It is
-   built entirely from glowing neon parts - an
-   oval rim, a spinning galaxy swirl and a
-   counter-rotating inner vortex with an energy
-   core - so it always shows on every device,
-   even where image textures do not load. The
-   portal picture is still added as a bonus
-   layer, along with an open flash, glow,
-   orbiting sparks, rising embers and a burst
-   of neon parts. Your character walks into it
-   on its own (PORTAL GATE), the teleport fires
-   on time and, on the new server, a portal
-   opens behind you and seals itself with a
-   particle implosion. No shockwave rings.
+   green portal opens in front of you. It is a
+   solid filled oval built from glowing neon
+   parts - layered bright discs, a smooth
+   glowing rim and dark spiral arms over a
+   counter-rotating inner vortex - so it always
+   shows on every device, even where image
+   textures do not load. The portal picture is
+   still added as a bonus layer, along with an
+   open flash, glow, orbiting sparks, rising
+   embers and a burst of neon parts. Your
+   character walks into it on its own (PORTAL
+   GATE), the teleport fires on time and, on
+   the new server, a portal opens behind you
+   and seals itself with a particle implosion.
+   No shockwave rings.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -3055,70 +3056,109 @@ Portal = (function()
     local function buildAssembly(face)
         local mainList = {}
         local innerList = {}
+        local staticList = {}
 
         local function add(list, part, localCFrame)
             table.insert(list, { part = part, cf = localCFrame })
         end
 
-        -- Oval rim of neon balls.
-        for i = 1, 28 do
-            local a = (i - 1) / 28 * math.pi * 2
-            local p = spawnBall(i % 4 == 0 and 0.5 or 0.34)
-            p.Color = (i % 4 == 0) and GLOW_SOFT or GLOW
+        -- Flat elliptical disc helper: a cylinder scaled into an oval,
+        -- used to fill the portal solidly (no holes, no gaps).
+        local function disc(w, h, thick, color, transparency, zOffset)
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(1, 1, 1)
+            p.Anchored = true
+            p.CanCollide = false
+            p.Material = Enum.Material.Neon
+            p.Color = color
+            p.Transparency = transparency
             p.Parent = face
-            add(mainList, p, CFrame.new(math.cos(a) * 2.7, math.sin(a) * 4.3, 0))
+            local mesh = Instance.new("SpecialMesh")
+            mesh.MeshType = Enum.MeshType.Cylinder
+            mesh.Scale = Vector3.new(w, thick, h)
+            mesh.Parent = p
+            add(staticList, p, CFrame.new(0, 0, zOffset) * CFrame.Angles(math.rad(90), 0, 0))
+            return p
         end
 
-        -- Spiral arms: a galaxy swirl so the portal reads instantly even
-        -- without any image texture.
-        for arm = 1, 4 do
-            local base = (arm - 1) / 4 * math.pi * 2
-            for i = 1, 12 do
-                local t = i / 12
-                local angle = base + t * 2.6
-                local radius = 0.5 + t * 2.55
-                local p = spawnBall(0.46 - t * 0.22)
-                p.Color = (i % 3 == 0) and GLOW_SOFT or GLOW
-                p.Parent = face
-                add(mainList, p, CFrame.new(
-                    math.cos(angle) * radius,
-                    math.sin(angle) * radius * 1.6,
-                    0
-                ))
-            end
+        -- Solid fill, layered back-to-front like the reference picture:
+        -- outer haze, bright body, hot core. Everything is a full oval so
+        -- the portal reads as one filled glowing disc.
+        disc(8.6, 9.4, 0.2, GLOW, 0.85, -0.30)
+        disc(7.6, 8.2, 0.2, GLOW, 0.22, -0.16)
+        disc(6.0, 6.6, 0.2, Color3.fromRGB(150, 240, 100), 0.28, -0.04)
+        disc(3.6, 4.0, 0.2, Color3.fromRGB(190, 255, 140), 0.35, 0.02)
+
+        -- Smooth bright rim: thin rods laid along the tangent, forming a
+        -- continuous glowing outline instead of spaced dots.
+        for i = 1, 44 do
+            local a = (i - 1) / 44 * math.pi * 2
+            local px = math.cos(a) * 4.3
+            local py = math.sin(a) * 4.7
+            local tx = -math.sin(a) * 4.3
+            local ty = math.cos(a) * 4.7
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(0.22, 0.22, 0.85)
+            p.Anchored = true
+            p.CanCollide = false
+            p.Material = Enum.Material.Neon
+            p.Color = (i % 2 == 0) and GLOW_SOFT or GLOW
+            p.Transparency = 0
+            p.Parent = face
+            local pos = Vector3.new(px, py, 0.1)
+            add(staticList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
         end
 
-        -- Inner counter-swirl for depth.
+        -- Dark swirling arms over the bright disc: the classic portal
+        -- vortex. Thicker and denser than before so the swirl is obvious.
         for arm = 1, 3 do
             local base = (arm - 1) / 3 * math.pi * 2
-            for i = 1, 8 do
-                local t = i / 8
-                local angle = base + t * 2.2
-                local radius = 0.35 + t * 1.5
-                local p = spawnBall(0.4 - t * 0.2)
-                p.Color = GLOW
+            for i = 1, 11 do
+                local t = i / 11
+                local a = base + t * 2.6
+                local r = 0.6 + t * 3.4
+                local px = math.cos(a) * r
+                local py = math.sin(a) * r * 1.09
+                local tx = -math.sin(a) * r
+                local ty = math.cos(a) * r * 1.09
+                local p = Instance.new("Part")
+                p.Size = Vector3.new(0.18, 0.18, 2.6 - t * 1.8)
+                p.Anchored = true
+                p.CanCollide = false
+                p.Material = Enum.Material.Neon
+                p.Color = Color3.fromRGB(0, 150, 40)
+                p.Transparency = 0.1
                 p.Parent = face
-                add(innerList, p, CFrame.new(
-                    math.cos(angle) * radius,
-                    math.sin(angle) * radius * 1.6,
-                    0
-                ))
+                local pos = Vector3.new(px, py, 0.35)
+                add(mainList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
             end
         end
 
-        -- Soft energy core disc (flat, faint green haze).
-        local core = Instance.new("Part")
-        core.Size = Vector3.new(5, 0.2, 5)
-        core.Shape = Enum.PartType.Cylinder
-        core.Anchored = true
-        core.CanCollide = false
-        core.Material = Enum.Material.Neon
-        core.Color = GLOW
-        core.Transparency = 0.8
-        core.Parent = face
-        add(mainList, core, CFrame.Angles(math.rad(90), 0, 0))
+        -- Inner bright counter-swirl for depth.
+        for arm = 1, 3 do
+            local base = (arm - 1) / 3 * math.pi * 2
+            for i = 1, 7 do
+                local t = i / 7
+                local a = base + t * 2.2
+                local r = 0.4 + t * 1.9
+                local px = math.cos(a) * r
+                local py = math.sin(a) * r * 1.09
+                local tx = -math.sin(a) * r
+                local ty = math.cos(a) * r * 1.09
+                local p = Instance.new("Part")
+                p.Size = Vector3.new(0.14, 0.14, 1.7 - t * 1.0)
+                p.Anchored = true
+                p.CanCollide = false
+                p.Material = Enum.Material.Neon
+                p.Color = GLOW_SOFT
+                p.Transparency = 0.12
+                p.Parent = face
+                local pos = Vector3.new(px, py, 0.3)
+                add(innerList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
+            end
+        end
 
-        return { main = mainList, inner = innerList }
+        return { main = mainList, inner = innerList, static = staticList }
     end
 
     -- Scattering burst of neon parts (opening) or implosion (closing).
@@ -3256,7 +3296,7 @@ Portal = (function()
                     if entry.part.Parent then
                         local sc = entry.cf
                         local scaled = CFrame.new(sc.Position * grow) * (sc - sc.Position)
-                        entry.part.CFrame = face.CFrame * CFrame.Angles(0, delta, 0) * scaled
+                        entry.part.CFrame = face.CFrame * CFrame.Angles(0, 0, delta) * scaled
                     end
                 end
             end
@@ -3267,14 +3307,13 @@ Portal = (function()
                     grow = math.min(1, grow + 0.055)
                     place(assembly.main, spin)
                     place(assembly.inner, -spin * 1.7)
+                    place(assembly.static, 0)
                     if glow.Parent then
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
                     end
                     if frontImage and frontImage.Parent then
                         frontImage.Transparency = 0.06 + math.sin(t * 5) * 0.06
                     end
-                    -- In-plane rotation so the portal image itself spins.
-                    face.CFrame = face.CFrame * CFrame.Angles(0, 0, math.rad(1.2))
                     nextEmbers = nextEmbers - 0.05
                     if nextEmbers <= 0 then
                         nextEmbers = RNG:NextNumber(0.6, 1.2)
@@ -3347,7 +3386,7 @@ Portal = (function()
         -- Opening animation: the plate carrying the image grows from a
         -- point to full size while the neon frame spins up.
         tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = Vector3.new(5, 8, 0.3),
+            Size = Vector3.new(7.0, 7.6, 0.3),
         })
 
         ambient(face, glow, lastImages.front, cf, lastAssembly)
@@ -3377,7 +3416,7 @@ Portal = (function()
                 })
             end
         end
-        for _, list in ipairs({ lastAssembly and lastAssembly.main or {}, lastAssembly and lastAssembly.inner or {} }) do
+        for _, list in ipairs({ lastAssembly and lastAssembly.main or {}, lastAssembly and lastAssembly.inner or {}, lastAssembly and lastAssembly.static or {} }) do
             for _, entry in ipairs(list) do
                 if entry.part.Parent then
                     tween(entry.part, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
@@ -3413,7 +3452,7 @@ Portal = (function()
             base = workspace.CurrentCamera.CFrame.Position
         end
         local fwd = forwardVector()
-        local pos = base + fwd * 7 + Vector3.new(0, 1.3, 0)
+        local pos = base + fwd * 7 + Vector3.new(0, 4.6, 0)
         local cf = CFrame.new(pos, pos + fwd)
         openPortal(cf)
         setStatus("portal open — walk into it")
@@ -3478,7 +3517,7 @@ Portal = (function()
         local r = root()
         if r then base = r.Position end
         local behind = -forwardVector()
-        local pos = base + behind * 5 + Vector3.new(0, 1.4, 0)
+        local pos = base + behind * 5 + Vector3.new(0, 4.6, 0)
         local cf = CFrame.new(pos, pos + behind)
         local face = openPortal(cf, true)
         orbit(cf)
