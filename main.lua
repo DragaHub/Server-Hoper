@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.16"
+local VERSION = "2.17"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.16
+> SERVER FINDER v2.17
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1614,20 +1614,20 @@ InfoTextLabel.Text = [[
    Pick the RICK AND MORTY theme for the portal
    gun look. Three seconds before a teleport a
    green portal opens in front of you. It is a
-   solid filled oval built from glowing neon
-   parts - layered bright discs, a smooth
-   glowing rim and dark spiral arms over a
-   counter-rotating inner vortex - so it always
-   shows on every device, even where image
-   textures do not load. The portal picture is
-   still added as a bonus layer, along with an
-   open flash, glow, orbiting sparks, rising
-   embers and a burst of neon parts. Your
-   character walks into it on its own (PORTAL
-   GATE), the teleport fires on time and, on
-   the new server, a portal opens behind you
-   and seals itself with a particle implosion.
-   No shockwave rings.
+   solid oval filled with opaque green portal
+   liquid - a dark green edge, a dense green
+   body and a hot lime core that breathes -
+   with dark spiral arms over a counter-rotating
+   inner vortex, so it always shows on every
+   device, even where image textures do not
+   load. The portal picture is still added as a
+   bonus layer, along with an open flash, glow,
+   orbiting sparks, rising embers and a burst
+   of neon parts. Your character walks into it
+   on its own (PORTAL GATE), the teleport fires
+   on time and, on the new server, a portal
+   opens behind you and seals itself with a
+   particle implosion. No shockwave rings.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -3057,6 +3057,7 @@ Portal = (function()
         local mainList = {}
         local innerList = {}
         local staticList = {}
+        local liquidList = {}
 
         local function add(list, part, localCFrame)
             table.insert(list, { part = part, cf = localCFrame })
@@ -3078,16 +3079,17 @@ Portal = (function()
             mesh.Scale = Vector3.new(w, thick, h)
             mesh.Parent = p
             add(staticList, p, CFrame.new(0, 0, zOffset) * CFrame.Angles(math.rad(90), 0, 0))
+            table.insert(liquidList, { part = p, base = transparency, phase = #liquidList * 1.7 })
             return p
         end
 
-        -- Solid fill, layered back-to-front like the reference picture:
-        -- outer haze, bright body, hot core. Everything is a full oval so
-        -- the portal reads as one filled glowing disc.
-        disc(8.6, 9.4, 0.2, GLOW, 0.85, -0.30)
-        disc(7.6, 8.2, 0.2, GLOW, 0.22, -0.16)
-        disc(6.0, 6.6, 0.2, Color3.fromRGB(150, 240, 100), 0.28, -0.04)
-        disc(3.6, 4.0, 0.2, Color3.fromRGB(190, 255, 140), 0.35, 0.02)
+        -- The inside is filled with opaque green portal liquid: a dark
+        -- green edge, a dense green body and a hot lime core. Nothing is
+        -- transparent, so the background never shows through.
+        disc(8.8, 9.6, 0.2, Color3.fromRGB(24, 130, 36), 0.12, -0.30)
+        disc(7.8, 8.4, 0.2, Color3.fromRGB(52, 195, 42), 0.07, -0.18)
+        disc(6.2, 6.8, 0.2, Color3.fromRGB(105, 228, 55), 0.07, -0.08)
+        disc(3.8, 4.2, 0.2, Color3.fromRGB(178, 255, 132), 0.12, 0.0)
 
         -- Smooth bright rim: thin rods laid along the tangent, forming a
         -- continuous glowing outline instead of spaced dots.
@@ -3158,7 +3160,7 @@ Portal = (function()
             end
         end
 
-        return { main = mainList, inner = innerList, static = staticList }
+        return { main = mainList, inner = innerList, static = staticList, liquid = liquidList }
     end
 
     -- Scattering burst of neon parts (opening) or implosion (closing).
@@ -3308,6 +3310,15 @@ Portal = (function()
                     place(assembly.main, spin)
                     place(assembly.inner, -spin * 1.7)
                     place(assembly.static, 0)
+                    -- Liquid breathing: the fill swells and dims slightly
+                    -- so it looks alive instead of a flat sticker.
+                    if not assembly.closing then
+                        for _, liq in ipairs(assembly.liquid or {}) do
+                            if liq.part.Parent then
+                                liq.part.Transparency = math.clamp(liq.base + math.sin(t * 2.4 + liq.phase) * 0.05, 0, 1)
+                            end
+                        end
+                    end
                     if glow.Parent then
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
                     end
@@ -3405,6 +3416,7 @@ Portal = (function()
     local function closePortal(face)
         if not face or not face.Parent then return end
         playSound(CLOSE_SOUND, 1, face)
+        if lastAssembly then lastAssembly.closing = true end
         burst(face.CFrame, 14, true)
         tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
             Size = Vector3.new(0.3, 0.3, 0.3),
