@@ -1613,15 +1613,18 @@ InfoTextLabel.Text = [[
 15. RICK AND MORTY PORTAL
    Pick the RICK AND MORTY theme for the portal
    gun look. Three seconds before a teleport a
-   green portal opens in front of you: a
-   transparent plate carrying the portal image
-   on both sides, with an open flash, glow,
-   orbiting sparks, rising embers and a burst of
-   neon parts. Your character walks into it on
-   its own (PORTAL GATE), the teleport fires on
-   time and, on the new server, a portal opens
-   behind you and seals itself with a particle
-   implosion. No shockwave rings are used.
+   green portal opens in front of you: a glowing
+   neon oval built from parts (so it always
+   shows on every device) with a spinning
+   vortex and energy core, plus the portal
+   picture as an extra layer, an open flash,
+   glow, orbiting sparks, rising embers and a
+   burst of neon parts. Your character walks
+   into it on its own (PORTAL GATE), the
+   teleport fires on time and, on the new
+   server, a portal opens behind you and seals
+   itself with a particle implosion. No
+   shockwave rings are used.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -2978,6 +2981,7 @@ Portal = (function()
 
     local lastPortal = nil
     local lastImages = { front = nil, back = nil }
+    local lastAssembly = nil
 
     local function cleanup()
         if lastPortal and lastPortal.Parent then
@@ -2986,6 +2990,7 @@ Portal = (function()
         lastPortal = nil
         lastImages.front = nil
         lastImages.back = nil
+        lastAssembly = nil
     end
 
     local function playSound(id, volume, parent)
@@ -3040,6 +3045,54 @@ Portal = (function()
         p.Transparency = transparency or 0
         p.Parent = workspace
         return p
+    end
+
+    -- Procedural portal built from glowing neon parts: an oval frame, a
+    -- spinning pinwheel vortex and a soft energy core. Parts render on
+    -- every device, even where GUI images do not.
+    local function buildAssembly(face)
+        local list = {}
+
+        local function add(part, localCFrame)
+            table.insert(list, { part = part, cf = localCFrame })
+        end
+
+        -- Oval ring of neon balls.
+        for i = 1, 30 do
+            local a = (i - 1) / 30 * math.pi * 2
+            local p = spawnBall(0.42)
+            p.Parent = face
+            add(p, CFrame.new(math.cos(a) * 2.7, math.sin(a) * 4.3, 0))
+        end
+
+        -- Pinwheel vortex spokes.
+        for i = 1, 6 do
+            local a = (i - 1) / 6 * math.pi * 2
+            local p = Instance.new("Part")
+            p.Size = Vector3.new(0.16, 3.1, 0.16)
+            p.Anchored = true
+            p.CanCollide = false
+            p.Material = Enum.Material.Neon
+            p.Color = GLOW_SOFT
+            p.Transparency = 0.4
+            p.Parent = face
+            add(p, CFrame.new(math.cos(a) * 1.5, math.sin(a) * 1.5, 0)
+                * CFrame.Angles(0, 0, a - math.pi / 2))
+        end
+
+        -- Soft energy core disc (flat, faint green haze).
+        local core = Instance.new("Part")
+        core.Size = Vector3.new(5, 0.2, 5)
+        core.Shape = Enum.PartType.Cylinder
+        core.Anchored = true
+        core.CanCollide = false
+        core.Material = Enum.Material.Neon
+        core.Color = GLOW
+        core.Transparency = 0.8
+        core.Parent = face
+        add(core, CFrame.Angles(math.rad(90), 0, 0))
+
+        return list
     end
 
     -- Scattering burst of neon parts (opening) or implosion (closing).
@@ -3163,23 +3216,33 @@ Portal = (function()
         end)
     end
 
-    -- Ambient life while the portal is open: tumble + in-plane spin,
-    -- breathing glow, decal shimmer and periodic embers.
-    local function ambient(face, glow, frontImage, center)
+    -- Ambient life while the portal is open: the whole neon assembly
+    -- spins around the portal axis, the glow breathes, the image shimmers
+    -- and embers keep rising.
+    local function ambient(face, glow, frontImage, center, assembly)
         task.spawn(function()
             local t = 0
+            local spin = 0
+            local grow = 0
             local nextEmbers = 0.4
             while face.Parent do
                 if config.Animations then
                     t = t + 0.05
-                    -- Changed rotation axes: rolls over its horizontal axis
-                    -- and spins in-plane instead of a single vertical turn.
-                    face.CFrame = face.CFrame * CFrame.Angles(math.rad(3.2), 0, math.rad(1.4))
+                    spin = spin + 0.11
+                    grow = math.min(1, grow + 0.055)
+                    for _, entry in ipairs(assembly) do
+                        if entry.part.Parent then
+                            local sc = entry.cf
+                            local scaled = CFrame.new(sc.Position * grow) * (sc - sc.Position)
+                            entry.part.CFrame = face.CFrame * CFrame.Angles(0, spin, 0) * scaled
+                        end
+                    end
                     if glow.Parent then
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
                     end
                     if frontImage and frontImage.Parent then
                         frontImage.ImageTransparency = 0.06 + math.sin(t * 5) * 0.06
+                        frontImage.Rotation = (frontImage.Rotation + 1.5) % 360
                     end
                     nextEmbers = nextEmbers - 0.05
                     if nextEmbers <= 0 then
@@ -3206,46 +3269,28 @@ Portal = (function()
         face.Parent = workspace
         lastPortal = face
 
-        -- The image is drawn with SurfaceGui (unlit, so it always shows
-        -- even in dark scenes) on both faces of the invisible plate.
-        local guiFront = Instance.new("SurfaceGui")
-        guiFront.Name = "PortalImage"
-        guiFront.Face = Enum.NormalId.Front
-        guiFront.Adornee = face
-        guiFront.LightInfluence = 0
-        guiFront.AlwaysOnTop = true
-        guiFront.CanvasSize = Vector2.new(100, 100)
-        guiFront.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-        guiFront.Parent = face
+        -- The image is drawn with a BillboardGui: it always faces the
+        -- camera and is unlit, so the portal shows on every device and in
+        -- any lighting, even though the plate itself stays invisible.
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "PortalImage"
+        billboard.Adornee = face
+        billboard.LightInfluence = 0
+        billboard.AlwaysOnTop = true
+        billboard.Size = UDim2.fromOffset(360, 576)
+        billboard.StudsOffset = Vector3.new(0, 0, 0)
+        billboard.Parent = face
 
-        local frontImage = Instance.new("ImageLabel")
-        frontImage.Name = "Image"
-        frontImage.Size = UDim2.new(1, 0, 1, 0)
-        frontImage.BackgroundTransparency = 1
-        frontImage.Image = IMG
-        frontImage.ImageTransparency = 0
-        frontImage.Parent = guiFront
+        local portalImage = Instance.new("ImageLabel")
+        portalImage.Name = "Image"
+        portalImage.Size = UDim2.new(1, 0, 1, 0)
+        portalImage.BackgroundTransparency = 1
+        portalImage.Image = IMG
+        portalImage.ImageTransparency = 0
+        portalImage.Parent = billboard
 
-        local guiBack = Instance.new("SurfaceGui")
-        guiBack.Name = "PortalImageBack"
-        guiBack.Face = Enum.NormalId.Back
-        guiBack.Adornee = face
-        guiBack.LightInfluence = 0
-        guiBack.AlwaysOnTop = true
-        guiBack.CanvasSize = Vector2.new(100, 100)
-        guiBack.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-        guiBack.Parent = face
-
-        local backImage = Instance.new("ImageLabel")
-        backImage.Name = "Image"
-        backImage.Size = UDim2.new(1, 0, 1, 0)
-        backImage.BackgroundTransparency = 1
-        backImage.Image = IMG
-        backImage.ImageTransparency = 0
-        backImage.Parent = guiBack
-
-        lastImages.front = frontImage
-        lastImages.back = backImage
+        lastImages.front = portalImage
+        lastImages.back = portalImage
 
         local glow = Instance.new("PointLight")
         glow.Color = GLOW
@@ -3266,12 +3311,10 @@ Portal = (function()
             orbit(cf)
         end
 
-        -- Opening animation: grow from a point while rolling on its side.
-        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = Vector3.new(5, 8, 0.3),
-        })
+        -- Neon portal frame (always visible) + image as an extra layer.
+        lastAssembly = buildAssembly(face)
 
-        ambient(face, glow, lastImages.front, cf)
+        ambient(face, glow, lastImages.front, cf, lastAssembly)
 
         task.delay(12, function()
             if face == lastPortal and face.Parent then
@@ -3295,6 +3338,13 @@ Portal = (function()
             if img and img.Parent then
                 tween(img, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
                     ImageTransparency = 1,
+                })
+            end
+        end
+        for _, entry in ipairs(lastAssembly or {}) do
+            if entry.part.Parent then
+                tween(entry.part, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                    Transparency = 1,
                 })
             end
         end
@@ -3398,6 +3448,21 @@ Portal = (function()
             closePortal(face)
         end)
     end
+
+    -- Warm the client image cache so the portal picture is already
+    -- downloaded when the portal opens (some devices need a few seconds).
+    local function preloadImage()
+        pcall(function()
+            local warm = Instance.new("ImageLabel")
+            warm.Name = "PortalWarm"
+            warm.Size = UDim2.fromOffset(1, 1)
+            warm.BackgroundTransparency = 1
+            warm.Image = IMG
+            warm.Visible = false
+            warm.Parent = ScreenGui
+        end)
+    end
+    preloadImage()
 
     return {
         cleanup = cleanup,
