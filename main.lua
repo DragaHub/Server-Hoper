@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.11"
+local VERSION = "2.12"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.11
+> SERVER FINDER v2.12
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -3241,9 +3241,10 @@ Portal = (function()
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
                     end
                     if frontImage and frontImage.Parent then
-                        frontImage.ImageTransparency = 0.06 + math.sin(t * 5) * 0.06
-                        frontImage.Rotation = (frontImage.Rotation + 1.5) % 360
+                        frontImage.Transparency = 0.06 + math.sin(t * 5) * 0.06
                     end
+                    -- In-plane rotation so the portal image itself spins.
+                    face.CFrame = face.CFrame * CFrame.Angles(0, 0, math.rad(1.2))
                     nextEmbers = nextEmbers - 0.05
                     if nextEmbers <= 0 then
                         nextEmbers = RNG:NextNumber(0.6, 1.2)
@@ -3264,33 +3265,32 @@ Portal = (function()
         face.CanCollide = false
         face.CanQuery = false
         face.Material = Enum.Material.Plastic
-        face.Transparency = 1
+        face.Color = Color3.fromRGB(0, 0, 0)
+        face.Transparency = 0.99
         face.CFrame = cf
         face.Parent = workspace
         lastPortal = face
 
-        -- The image is drawn with a BillboardGui: it always faces the
-        -- camera and is unlit, so the portal shows on every device and in
-        -- any lighting, even though the plate itself stays invisible.
-        local billboard = Instance.new("BillboardGui")
-        billboard.Name = "PortalImage"
-        billboard.Adornee = face
-        billboard.LightInfluence = 0
-        billboard.AlwaysOnTop = true
-        billboard.Size = UDim2.fromOffset(360, 576)
-        billboard.StudsOffset = Vector3.new(0, 0, 0)
-        billboard.Parent = face
+        -- The image is a Decal on both faces. The plate stays 99%
+        -- transparent (effectively invisible), and that is exactly what
+        -- lets Roblox render the decal: a fully transparent part hides
+        -- its decals, 0.99 keeps them visible.
+        local decalFront = Instance.new("Decal")
+        decalFront.Name = "PortalImage"
+        decalFront.Texture = IMG
+        decalFront.Face = Enum.NormalId.Front
+        decalFront.Transparency = 0
+        decalFront.Parent = face
 
-        local portalImage = Instance.new("ImageLabel")
-        portalImage.Name = "Image"
-        portalImage.Size = UDim2.new(1, 0, 1, 0)
-        portalImage.BackgroundTransparency = 1
-        portalImage.Image = IMG
-        portalImage.ImageTransparency = 0
-        portalImage.Parent = billboard
+        local decalBack = Instance.new("Decal")
+        decalBack.Name = "PortalImageBack"
+        decalBack.Texture = IMG
+        decalBack.Face = Enum.NormalId.Back
+        decalBack.Transparency = 0
+        decalBack.Parent = face
 
-        lastImages.front = portalImage
-        lastImages.back = portalImage
+        lastImages.front = decalFront
+        lastImages.back = decalBack
 
         local glow = Instance.new("PointLight")
         glow.Color = GLOW
@@ -3313,6 +3313,12 @@ Portal = (function()
 
         -- Neon portal frame (always visible) + image as an extra layer.
         lastAssembly = buildAssembly(face)
+
+        -- Opening animation: the plate carrying the image grows from a
+        -- point to full size while the neon frame spins up.
+        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = Vector3.new(5, 8, 0.3),
+        })
 
         ambient(face, glow, lastImages.front, cf, lastAssembly)
 
@@ -3337,7 +3343,7 @@ Portal = (function()
         for _, img in pairs({ lastImages.front, lastImages.back }) do
             if img and img.Parent then
                 tween(img, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                    ImageTransparency = 1,
+                    Transparency = 1,
                 })
             end
         end
