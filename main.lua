@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.9"
+local VERSION = "2.10"
 
 local guiAlive = true
 local isHopping = false
@@ -190,7 +190,7 @@ local failedServers = {}
 -- so it survives teleports (every hop runs a fresh script instance) and
 -- decays again once the API answers normally.
 local RATE_LIMIT_FILE = "ServerFinderRateLimit.json"
-local rateLimitBackoff = 4
+local rateLimitBackoff = 8
 local rateLimitedUntilEpoch = 0
 
 if canReadFile(RATE_LIMIT_FILE) then
@@ -208,9 +208,9 @@ end
 
 local function noteRateLimited(retryAfter)
     if type(retryAfter) == "number" and retryAfter > 0 then
-        rateLimitBackoff = math.min(60, math.max(rateLimitBackoff, retryAfter))
+        rateLimitBackoff = math.min(120, math.max(rateLimitBackoff, retryAfter))
     else
-        rateLimitBackoff = math.min(60, rateLimitBackoff * 2)
+        rateLimitBackoff = math.min(120, rateLimitBackoff * 2)
     end
     rateLimitedUntilEpoch = os.time() + rateLimitBackoff
     pcall(function()
@@ -221,9 +221,11 @@ local function noteRateLimited(retryAfter)
 end
 
 local function noteRateLimitOk()
-    if rateLimitedUntilEpoch > os.time() or rateLimitBackoff ~= 4 then
+    if rateLimitedUntilEpoch > os.time() or rateLimitBackoff > 8 then
+        if rateLimitBackoff > 8 then
+            rateLimitBackoff = math.max(8, math.floor(rateLimitBackoff / 2))
+        end
         rateLimitedUntilEpoch = 0
-        rateLimitBackoff = 4
         pcall(function()
             if type(writefile) == "function" then
                 writefile(RATE_LIMIT_FILE, HttpService:JSONEncode(0))
@@ -231,6 +233,30 @@ local function noteRateLimitOk()
         end)
     end
 end
+
+-- Persisted candidate pool. After a scan we use only ONE server and
+-- stash the rest here, so later hops can pick a server without calling
+-- the games API at all. This keeps the 429 rate limit cold. Entries
+-- older than a few minutes are dropped on load (they go stale as
+-- servers fill up).
+local serverPool = {}
+pcall(function()
+    if canReadFile("ServerFinderPool.json") then
+        local ok, data = pcall(function()
+            return HttpService:JSONDecode(readfile("ServerFinderPool.json"))
+        end)
+        if ok and type(data) == "table" then
+            for _, s in ipairs(data) do
+                if type(s) == "table" and type(s.id) == "string" and s.id ~= ""
+                    and #s.id <= 100 and type(s.ts) == "number"
+                    and (os.time() - s.ts) <= 300
+                then
+                    table.insert(serverPool, s)
+                end
+            end
+        end
+    end
+end)
 
 local function forgetOldestVisited(keep)
     visitedServers = pruneVisited(visitedServers, keep)
@@ -268,7 +294,7 @@ local defaultSettings = {
     MinPlayers = 3,
     MinFreeSlots = 2,
     MinFps = 0,
-    AnalyzeSeconds = 5,
+    AnalyzeSeconds = 8,
     SelectionMode = "SMART",
     MaxPing = 0,
     PeopleRegion = "ANY",
@@ -1475,7 +1501,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.9
+> SERVER FINDER v2.10
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1498,9 +1524,10 @@ InfoTextLabel.Text = [[
    server hops, so the API is never hammered.
 
 4. FILTERS
-   Premium, active chat, minimum players, free slots,
-   optional max ping, minimum server FPS and audience
-   region.
+   Premium, active chat (checked over a rolling window,
+   not just the analyse seconds), minimum players, free
+   slots, optional max ping, minimum server FPS and
+   audience region.
 
 5. PEOPLE REGION
    Roblox does not expose a physical datacenter in
@@ -1521,6 +1548,8 @@ InfoTextLabel.Text = [[
    Player cards update in place; avatars/friendship
    are cached, country requests are concurrency-limited,
    chat events are deduplicated and file saves debounced.
+   A persisted candidate pool reuses scan results across
+   hops so the games API is called far less often.
 
 9. GUI
    Fully animated retro-terminal interface: CRT
@@ -2039,6 +2068,7 @@ local chatMessageCount = 0
 local russianChatCount = 0
 local uniqueChatters = {}
 local recentChat = {}
+local chatLog = {}
 
 local RUSSIAN_SPECIFIC = { [0x401] = true, [0x451] = true, [0x42B] = true, [0x44B] = true, [0x42D] = true, [0x44D] = true, [0x42A] = true, [0x44A] = true }
 local UKRAINIAN_SPECIFIC = { [0x406] = true, [0x456] = true, [0x407] = true, [0x457] = true, [0x404] = true, [0x454] = true, [0x490] = true, [0x491] = true }
@@ -2071,10 +2101,17 @@ local function bumpChat(userId, text)
         return
     end
     recentChat[userId] = { text = text, at = now }
+    local ru = looksRussian(text)
     chatMessageCount = chatMessageCount + 1
     uniqueChatters[userId] = true
-    if looksRussian(text) then
+    if ru then
         russianChatCount = russianChatCount + 1
+    end
+    -- Rolling log so analysis sees recent activity even when it happened
+    -- just before the analyze window started.
+    table.insert(chatLog, { at = now, userId = userId, ru = ru })
+    if #chatLog > 200 then
+        table.remove(chatLog, 1)
     end
 end
 
@@ -2351,6 +2388,13 @@ local function httpGet(url, token)
         if not hopStillActive(token) then
             return nil, "stopped"
         end
+        -- Minimum gap between requests so bursts never trip the limit.
+        local lastAt = sessionStats.lastRequestAt or 0
+        local since = os.clock() - lastAt
+        if since < 0.35 then
+            task.wait(0.35 - since)
+        end
+        sessionStats.lastRequestAt = os.clock()
         local success, res
         if type(httpRequest) == "function" then
             success, res = pcall(function()
@@ -2440,6 +2484,57 @@ local function pickServer(valid)
 end
 
 local function getUnvisitedServer(token)
+    local function savePool()
+        if type(writefile) ~= "function" then return end
+        pcall(function()
+            writefile("ServerFinderPool.json", HttpService:JSONEncode(serverPool))
+        end)
+    end
+
+    local function pooledOk(s)
+        if type(s) ~= "table" or type(s.id) ~= "string" or s.id == "" then
+            return false
+        end
+        if visitedServers[s.id] or s.id == game.JobId then
+            return false
+        end
+        local failedAt = failedServers[s.id]
+        if failedAt and (os.time() - failedAt) < 90 then
+            return false
+        end
+        if type(s.ts) == "number" and (os.time() - s.ts) > 300 then
+            return false
+        end
+        local playing = tonumber(s.playing) or 0
+        local maxPlayers = tonumber(s.maxPlayers) or 0
+        if playing < config.MinPlayers then return false end
+        if maxPlayers > 0 and (maxPlayers - playing) < config.MinFreeSlots then return false end
+        if config.MaxPing > 0 and type(s.ping) == "number" and s.ping > config.MaxPing then return false end
+        if config.MinFps > 0 and type(s.fps) == "number" and s.fps < config.MinFps then return false end
+        return true
+    end
+
+    -- Serve from the persisted pool first: zero API calls.
+    local pooled = nil
+    while #serverPool > 0 and not pooled do
+        local s = serverPool[#serverPool]
+        serverPool[#serverPool] = nil
+        if pooledOk(s) then
+            pooled = s
+        end
+    end
+    if pooled then
+        savePool()
+        setProgress(1, GREEN)
+        return {
+            id = pooled.id,
+            playing = tonumber(pooled.playing) or 0,
+            maxPlayers = tonumber(pooled.maxPlayers) or 0,
+            ping = pooled.ping,
+            fps = pooled.fps,
+        }, nil
+    end
+
     local selectedSort = config.SelectionMode == "RANDOM"
         and (RNG:NextInteger(0, 1) == 0 and "Asc" or "Desc") or "Desc"
     local cursor = ""
@@ -2465,7 +2560,13 @@ local function getUnvisitedServer(token)
             cursorPart
         )
         local body, err = httpGet(url, token)
-        if not body then return nil, err or "api error" end
+        if not body then
+            if err == "rate limited" and #candidates > 0 then
+                -- Keep what we already collected instead of wasting it.
+                break
+            end
+            return nil, err or "api error"
+        end
 
         local decoded, data = pcall(function() return HttpService:JSONDecode(body) end)
         if not (decoded and type(data) == "table" and type(data.data) == "table") then
@@ -2518,6 +2619,13 @@ local function getUnvisitedServer(token)
     local chosen = pickServer(candidates)
     if chosen then
         setProgress(1, GREEN)
+        for _, c in ipairs(candidates) do
+            if c ~= chosen and #serverPool < 60 then
+                c.ts = os.time()
+                table.insert(serverPool, c)
+            end
+        end
+        savePool()
         return chosen, nil
     end
     return nil, "no unvisited servers"
@@ -2644,7 +2752,7 @@ executeHop = function()
     -- again. Waiting here (rather than during the hop) keeps the
     -- watchdog from interrupting a legitimate cooldown.
     local cooldown = rateLimitCooldown()
-    if cooldown > 0 then
+    if cooldown > 0 and #serverPool == 0 then
         setStatus(string.format("rate limited; retry in %.0fs", cooldown))
         notify("HTTP 429 — backing off " .. math.floor(cooldown) .. "s", RED)
         if config.AutoHop then
@@ -2823,20 +2931,26 @@ local function getRegionStats(region)
     return matched, known, percent
 end
 
-local function countKeys(data)
-    local count = 0
-    for _ in pairs(data) do count = count + 1 end
-    return count
-end
-
 local function evaluateServer()
     evaluateToken = evaluateToken + 1
     local token = evaluateToken
     if not config.AutoHop or isHopping then return end
 
-    chatMessageCount = 0
-    russianChatCount = 0
-    table.clear(uniqueChatters)
+    local function chatStats(windowSeconds)
+        local total, russian, chatters = 0, 0, {}
+        local now = os.clock()
+        for _, entry in ipairs(chatLog) do
+            if now - entry.at <= windowSeconds then
+                total = total + 1
+                chatters[entry.userId] = true
+                if entry.ru then russian = russian + 1 end
+            end
+        end
+        local unique = 0
+        for _ in pairs(chatters) do unique = unique + 1 end
+        return total, unique, russian
+    end
+
     local seconds = config.AnalyzeSeconds
     setProgress(0, P(), true)
     for elapsed = 0, seconds - 1 do
@@ -2866,7 +2980,8 @@ local function evaluateServer()
 
     local donatorCount = countDonators()
     local playerCount = #Players:GetPlayers()
-    local chatterCount = countKeys(uniqueChatters)
+    local chatWindow = math.max(seconds, 8) + 8
+    local chatMessageCount, chatterCount, russianChatCount = chatStats(chatWindow)
     local passDonators = not config.FilterDonators or donatorCount >= 1
     local passChat = not config.FilterChat or chatMessageCount >= 1
     local passPlayers = playerCount >= config.MinPlayers
