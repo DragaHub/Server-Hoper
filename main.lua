@@ -2977,12 +2977,15 @@ Portal = (function()
     local AUTO_WALK_DELAY = 1.2
 
     local lastPortal = nil
+    local lastImages = { front = nil, back = nil }
 
     local function cleanup()
         if lastPortal and lastPortal.Parent then
             pcall(function() lastPortal:Destroy() end)
         end
         lastPortal = nil
+        lastImages.front = nil
+        lastImages.back = nil
     end
 
     local function playSound(id, volume, parent)
@@ -3162,7 +3165,7 @@ Portal = (function()
 
     -- Ambient life while the portal is open: tumble + in-plane spin,
     -- breathing glow, decal shimmer and periodic embers.
-    local function ambient(face, glow, decalFront, center)
+    local function ambient(face, glow, frontImage, center)
         task.spawn(function()
             local t = 0
             local nextEmbers = 0.4
@@ -3175,8 +3178,8 @@ Portal = (function()
                     if glow.Parent then
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
                     end
-                    if decalFront.Parent then
-                        decalFront.Transparency = 0.06 + math.sin(t * 5) * 0.06
+                    if frontImage and frontImage.Parent then
+                        frontImage.ImageTransparency = 0.06 + math.sin(t * 5) * 0.06
                     end
                     nextEmbers = nextEmbers - 0.05
                     if nextEmbers <= 0 then
@@ -3203,19 +3206,46 @@ Portal = (function()
         face.Parent = workspace
         lastPortal = face
 
-        local decalFront = Instance.new("Decal")
-        decalFront.Name = "PortalImage"
-        decalFront.Texture = IMG
-        decalFront.Face = Enum.NormalId.Front
-        decalFront.Transparency = 0
-        decalFront.Parent = face
+        -- The image is drawn with SurfaceGui (unlit, so it always shows
+        -- even in dark scenes) on both faces of the invisible plate.
+        local guiFront = Instance.new("SurfaceGui")
+        guiFront.Name = "PortalImage"
+        guiFront.Face = Enum.NormalId.Front
+        guiFront.Adornee = face
+        guiFront.LightInfluence = 0
+        guiFront.AlwaysOnTop = true
+        guiFront.CanvasSize = Vector2.new(100, 100)
+        guiFront.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+        guiFront.Parent = face
 
-        local decalBack = Instance.new("Decal")
-        decalBack.Name = "PortalImageBack"
-        decalBack.Texture = IMG
-        decalBack.Face = Enum.NormalId.Back
-        decalBack.Transparency = 0
-        decalBack.Parent = face
+        local frontImage = Instance.new("ImageLabel")
+        frontImage.Name = "Image"
+        frontImage.Size = UDim2.new(1, 0, 1, 0)
+        frontImage.BackgroundTransparency = 1
+        frontImage.Image = IMG
+        frontImage.ImageTransparency = 0
+        frontImage.Parent = guiFront
+
+        local guiBack = Instance.new("SurfaceGui")
+        guiBack.Name = "PortalImageBack"
+        guiBack.Face = Enum.NormalId.Back
+        guiBack.Adornee = face
+        guiBack.LightInfluence = 0
+        guiBack.AlwaysOnTop = true
+        guiBack.CanvasSize = Vector2.new(100, 100)
+        guiBack.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+        guiBack.Parent = face
+
+        local backImage = Instance.new("ImageLabel")
+        backImage.Name = "Image"
+        backImage.Size = UDim2.new(1, 0, 1, 0)
+        backImage.BackgroundTransparency = 1
+        backImage.Image = IMG
+        backImage.ImageTransparency = 0
+        backImage.Parent = guiBack
+
+        lastImages.front = frontImage
+        lastImages.back = backImage
 
         local glow = Instance.new("PointLight")
         glow.Color = GLOW
@@ -3241,7 +3271,7 @@ Portal = (function()
             Size = Vector3.new(5, 8, 0.3),
         })
 
-        ambient(face, glow, decalFront, cf)
+        ambient(face, glow, lastImages.front, cf)
 
         task.delay(12, function()
             if face == lastPortal and face.Parent then
@@ -3261,10 +3291,10 @@ Portal = (function()
         tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
             Size = Vector3.new(0.3, 0.3, 0.3),
         })
-        for _, child in ipairs(face:GetChildren()) do
-            if child:IsA("Decal") then
-                tween(child, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                    Transparency = 1,
+        for _, img in pairs({ lastImages.front, lastImages.back }) do
+            if img and img.Parent then
+                tween(img, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                    ImageTransparency = 1,
                 })
             end
         end
