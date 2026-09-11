@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.17"
+local VERSION = "2.18"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.17
+> SERVER FINDER v2.18
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1613,21 +1613,21 @@ InfoTextLabel.Text = [[
 15. RICK AND MORTY PORTAL
    Pick the RICK AND MORTY theme for the portal
    gun look. Three seconds before a teleport a
-   green portal opens in front of you. It is a
-   solid oval filled with opaque green portal
-   liquid - a dark green edge, a dense green
-   body and a hot lime core that breathes -
-   with dark spiral arms over a counter-rotating
-   inner vortex, so it always shows on every
-   device, even where image textures do not
-   load. The portal picture is still added as a
-   bonus layer, along with an open flash, glow,
-   orbiting sparks, rising embers and a burst
-   of neon parts. Your character walks into it
-   on its own (PORTAL GATE), the teleport fires
-   on time and, on the new server, a portal
-   opens behind you and seals itself with a
-   particle implosion. No shockwave rings.
+   green portal opens in front of you: a solid
+   oval filled with dense green portal liquid
+   (dark edge, green body, hot lime core) built
+   from glowing balls so it renders on every
+   device, with dark spiral arms over a
+   counter-rotating inner vortex. The teleport
+   always fires on time after three seconds -
+   walking into the portal just triggers it
+   instantly, so PvP servers can never stall
+   the hop. The portal picture is still added
+   as a bonus layer, along with an open flash,
+   glow, orbiting sparks, rising embers and a
+   burst of neon parts. On the new server a
+   portal opens behind you and seals itself
+   with a particle implosion. No shockwaves.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -1686,7 +1686,7 @@ createToggle(SettingsScroll, "ANTI AFK", UDim2.new(0, 6, 0, 518), UDim2.new(1, -
 hint(SettingsScroll, "auto-reset idle so you can walk away while it works", UDim2.new(0, 6, 0, 546))
 
 createToggle(SettingsScroll, "PORTAL GATE", UDim2.new(0, 6, 0, 570), UDim2.new(1, -16, 0, 26), "PortalGate")
-hint(SettingsScroll, "R&M theme: auto-walks you into the portal to teleport", UDim2.new(0, 6, 0, 598))
+hint(SettingsScroll, "R&M theme: step in to jump early (never blocks)", UDim2.new(0, 6, 0, 598))
 
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
@@ -2978,9 +2978,7 @@ Portal = (function()
     local GLOW = Color3.fromRGB(140, 255, 96)
     local GLOW_SOFT = Color3.fromRGB(90, 255, 160)
     local ENTER_RADIUS = 5
-    local ENTRY_TIMEOUT = 20
     local MIN_OPEN = 3
-    local AUTO_WALK_DELAY = 1.2
 
     local lastPortal = nil
     local lastImages = { front = nil, back = nil }
@@ -3057,39 +3055,44 @@ Portal = (function()
         local mainList = {}
         local innerList = {}
         local staticList = {}
-        local liquidList = {}
 
         local function add(list, part, localCFrame)
             table.insert(list, { part = part, cf = localCFrame })
         end
 
-        -- Flat elliptical disc helper: a cylinder scaled into an oval,
-        -- used to fill the portal solidly (no holes, no gaps).
-        local function disc(w, h, thick, color, transparency, zOffset)
-            local p = Instance.new("Part")
-            p.Size = Vector3.new(1, 1, 1)
-            p.Anchored = true
-            p.CanCollide = false
-            p.Material = Enum.Material.Neon
-            p.Color = color
-            p.Transparency = transparency
-            p.Parent = face
-            local mesh = Instance.new("SpecialMesh")
-            mesh.MeshType = Enum.MeshType.Cylinder
-            mesh.Scale = Vector3.new(w, thick, h)
-            mesh.Parent = p
-            add(staticList, p, CFrame.new(0, 0, zOffset) * CFrame.Angles(math.rad(90), 0, 0))
-            table.insert(liquidList, { part = p, base = transparency, phase = #liquidList * 1.7 })
-            return p
+        -- The inside is filled with a dense grid of glowing balls - plain
+        -- Parts, which render on every executor - forming a solid oval of
+        -- green portal liquid: dark edge -> green body -> hot lime core.
+        local function liquidFill()
+            local rx = 3.3
+            local ry = 3.9
+            local step = 0.48
+            for y = -ry, ry, step do
+                for x = -rx, rx, step do
+                    local rr = math.sqrt((x / rx) ^ 2 + (y / ry) ^ 2)
+                    if rr <= 1 then
+                        local col, tr
+                        if rr > 0.78 then
+                            col = Color3.fromRGB(18, 118, 40)
+                            tr = 0.12
+                        elseif rr > 0.55 then
+                            col = Color3.fromRGB(36, 168, 46)
+                            tr = 0.08
+                        elseif rr > 0.32 then
+                            col = Color3.fromRGB(88, 214, 58)
+                            tr = 0.06
+                        else
+                            col = Color3.fromRGB(190, 255, 145)
+                            tr = 0.08
+                        end
+                        local p = spawnBall(0.62, col, tr)
+                        p.Parent = face
+                        add(staticList, p, CFrame.new(x, y, 0.05))
+                    end
+                end
+            end
         end
-
-        -- The inside is filled with opaque green portal liquid: a dark
-        -- green edge, a dense green body and a hot lime core. Nothing is
-        -- transparent, so the background never shows through.
-        disc(8.8, 9.6, 0.2, Color3.fromRGB(24, 130, 36), 0.12, -0.30)
-        disc(7.8, 8.4, 0.2, Color3.fromRGB(52, 195, 42), 0.07, -0.18)
-        disc(6.2, 6.8, 0.2, Color3.fromRGB(105, 228, 55), 0.07, -0.08)
-        disc(3.8, 4.2, 0.2, Color3.fromRGB(178, 255, 132), 0.12, 0.0)
+        liquidFill()
 
         -- Smooth bright rim: thin rods laid along the tangent, forming a
         -- continuous glowing outline instead of spaced dots.
@@ -3160,7 +3163,7 @@ Portal = (function()
             end
         end
 
-        return { main = mainList, inner = innerList, static = staticList, liquid = liquidList }
+        return { main = mainList, inner = innerList, static = staticList }
     end
 
     -- Scattering burst of neon parts (opening) or implosion (closing).
@@ -3309,15 +3312,13 @@ Portal = (function()
                     grow = math.min(1, grow + 0.055)
                     place(assembly.main, spin)
                     place(assembly.inner, -spin * 1.7)
-                    place(assembly.static, 0)
-                    -- Liquid breathing: the fill swells and dims slightly
-                    -- so it looks alive instead of a flat sticker.
-                    if not assembly.closing then
-                        for _, liq in ipairs(assembly.liquid or {}) do
-                            if liq.part.Parent then
-                                liq.part.Transparency = math.clamp(liq.base + math.sin(t * 2.4 + liq.phase) * 0.05, 0, 1)
-                            end
-                        end
+                    -- Place the static fill while it grows, then one final
+                    -- time at full size (keeps it cheap to run).
+                    if grow < 1 then
+                        place(assembly.static, 0)
+                    elseif not assembly.staticDone then
+                        place(assembly.static, 0)
+                        assembly.staticDone = true
                     end
                     if glow.Parent then
                         glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
@@ -3416,7 +3417,6 @@ Portal = (function()
     local function closePortal(face)
         if not face or not face.Parent then return end
         playSound(CLOSE_SOUND, 1, face)
-        if lastAssembly then lastAssembly.closing = true end
         burst(face.CFrame, 14, true)
         tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
             Size = Vector3.new(0.3, 0.3, 0.3),
@@ -3443,18 +3443,6 @@ Portal = (function()
         end)
     end
 
-    -- Walks the character into the portal so the hop never depends on
-    -- the player moving manually.
-    local function autoWalk(portalPos)
-        local hum = humanoid()
-        if not hum or hum.Health <= 0 then return end
-        pcall(function()
-            hum.Sit = false
-            hum.WalkSpeed = math.max(tonumber(hum.WalkSpeed) or 16, 16)
-            hum:MoveTo(portalPos)
-        end)
-    end
-
     local function gate(token)
         if currentTheme ~= "RICK AND MORTY" then return end
         local base = Vector3.new(0, 12, 0)
@@ -3467,56 +3455,32 @@ Portal = (function()
         local pos = base + fwd * 7 + Vector3.new(0, 4.6, 0)
         local cf = CFrame.new(pos, pos + fwd)
         openPortal(cf)
-        setStatus("portal open — walk into it")
-        notify("Portal open — step inside to jump", GLOW)
+        setStatus("portal open — teleporting in " .. MIN_OPEN .. "s")
+        notify("Portal open — teleporting in " .. MIN_OPEN .. "s", GLOW)
         local openedAt = os.clock()
         local entered = false
-        local walking = false
-        local stuckPos = nil
-        local stuckAt = 0
-        local lastMoveAt = 0
-        if config.PortalGate then
-            while hopStillActive(token) and (os.clock() - openedAt) < ENTRY_TIMEOUT do
-                sessionStats.lastHopStart = os.clock()
+        -- The teleport always fires on time and is never blocked. Walking
+        -- into the portal only triggers it instantly (a bonus, not a
+        -- gate), so a PvP server can never stall the hop.
+        while hopStillActive(token) and (os.clock() - openedAt) < MIN_OPEN do
+            sessionStats.lastHopStart = os.clock()
+            if config.PortalGate then
                 local rp = root()
-                -- Auto-walk assist so the character enters on its own.
-                if not entered and not walking and (os.clock() - openedAt) >= AUTO_WALK_DELAY then
-                    walking = true
-                    stuckPos = rp and rp.Position or nil
-                    stuckAt = os.clock()
-                    lastMoveAt = os.clock()
-                    setStatus("portal open — walking in")
-                    autoWalk(pos)
-                end
-                if walking and rp and (os.clock() - lastMoveAt) > 0.5 then
-                    lastMoveAt = os.clock()
-                    autoWalk(pos)
-                    if stuckPos and (rp.Position - stuckPos).Magnitude < 0.8 and (os.clock() - stuckAt) > 4 then
-                        -- Character is wedged; release control and jump anyway.
-                        break
-                    end
-                end
                 if rp and (rp.Position - pos).Magnitude < ENTER_RADIUS then
                     entered = true
                     break
                 end
-                task.wait(0.12)
             end
+            task.wait(0.1)
         end
         if entered then
-            setStatus("portal entered — teleporting")
+            setStatus("portal entered — teleporting now")
             notify("Portal entered!", GLOW)
             local last = lastPortal
             if last and last.Parent then
                 flash(last.CFrame)
                 burst(last.CFrame, 10)
             end
-        end
-        local wait = MIN_OPEN - (os.clock() - openedAt)
-        while wait > 0 and hopStillActive(token) do
-            sessionStats.lastHopStart = os.clock()
-            task.wait(0.1)
-            wait = wait - 0.1
         end
         if not hopStillActive(token) then
             cleanup()
