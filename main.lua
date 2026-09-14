@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.18"
+local VERSION = "2.20"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.18
+> SERVER FINDER v2.20
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -1615,19 +1615,21 @@ InfoTextLabel.Text = [[
    gun look. Three seconds before a teleport a
    green portal opens in front of you: a solid
    oval filled with dense green portal liquid
-   (dark edge, green body, hot lime core) built
-   from glowing balls so it renders on every
-   device, with dark spiral arms over a
-   counter-rotating inner vortex. The teleport
-   always fires on time after three seconds -
-   walking into the portal just triggers it
-   instantly, so PvP servers can never stall
-   the hop. The portal picture is still added
-   as a bonus layer, along with an open flash,
-   glow, orbiting sparks, rising embers and a
-   burst of neon parts. On the new server a
-   portal opens behind you and seals itself
-   with a particle implosion. No shockwaves.
+   built from glowing balls (dark edge, green
+   body, hot lime core that breathes) with a
+   smooth bright rim, outer corona, dark spiral
+   arms over a counter-rotating vortex and a
+   pulsating energy core. Effects: flash, glow,
+   orbiting sparks, rising embers, lightning
+   bolts, shimmer bursts and expanding energy
+   pulses. You can walk into the portal to jump
+   instantly; if you do not, it teleports on
+   time after 3s, so PvP can never stall the
+   hop. Auto-walk assist is optional (PORTAL
+   GATE toggle) and never blocks. On arrival a
+   portal is already behind you in full size
+   (no opening animation) and then seals with
+   implosion. No shockwaves.
 
 Use [?] and the gear for Info / Settings.]]
 InfoTextLabel.Parent = InfoScroll
@@ -1686,7 +1688,7 @@ createToggle(SettingsScroll, "ANTI AFK", UDim2.new(0, 6, 0, 518), UDim2.new(1, -
 hint(SettingsScroll, "auto-reset idle so you can walk away while it works", UDim2.new(0, 6, 0, 546))
 
 createToggle(SettingsScroll, "PORTAL GATE", UDim2.new(0, 6, 0, 570), UDim2.new(1, -16, 0, 26), "PortalGate")
-hint(SettingsScroll, "R&M theme: step in to jump early (never blocks)", UDim2.new(0, 6, 0, 598))
+hint(SettingsScroll, "R&M: walk in = instant jump, otherwise 3s auto (never blocks)", UDim2.new(0, 6, 0, 598))
 
 local ThemeSelectorBtn = Instance.new("TextButton")
 ThemeSelectorBtn.Size = UDim2.new(1, -16, 0, 26)
@@ -2901,8 +2903,9 @@ executeHop = function()
         end)
     end
 
-    -- Rick and Morty: open the portal three seconds before the jump and
-    -- (with PORTAL GATE on) wait for the player to walk through it.
+    -- Rick and Morty: open the portal three seconds before the jump.
+    -- Entry is optional: walk in to jump instantly, otherwise it fires
+    -- on time. Auto-walk is optional and never blocks.
     if Portal then
         Portal.gate(token)
     end
@@ -2912,7 +2915,7 @@ executeHop = function()
     end
     sessionStats.lastHopStart = os.clock()
 
-    -- Leave a marker so the next server seals a closing portal behind us.
+    -- Leave a marker so the next server can show the arrival portal instantly (no open anim).
     if currentTheme == "RICK AND MORTY" and type(writefile) == "function" then
         pcall(function()
             writefile("ServerFinderPortal.json", HttpService:JSONEncode({ ts = os.time() }))
@@ -2964,12 +2967,16 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- RICK AND MORTY PORTAL (v2.11)
--- A 3D portal built from Parts. Opens in front of the player three
--- seconds before a teleport (open sound, green flash, PointLight glow
--- and a burst of neon part-particles), optionally waits for the player
--- to walk inside, then jumps. On arrival a portal spawns behind the
--- player and seals itself (close sound). No shockwave rings.
+-- RICK AND MORTY PORTAL (v2.20)
+-- Front: opens 3s before teleport with growth anim, flash, glow,
+-- orbit, embers, bolts, shimmer, pulse. Solid oval filled with
+-- dense green liquid (balls), bright rim, corona, dark vortex,
+-- inner swirl, pulsating core. Entry optional (instant jump),
+-- auto-walk optional and never blocks.
+-- Arrival: portal behind player appears instantly at full size
+-- (NO opening animation) and then seals with implosion/close
+-- sound. This fixes the illogical "portal opens after arrival".
+-- No shockwave rings.
 -- ============================================================
 Portal = (function()
     local IMG = "rbxassetid://104310499688141"
@@ -2977,6 +2984,7 @@ Portal = (function()
     local CLOSE_SOUND = "rbxassetid://79092478163364"
     local GLOW = Color3.fromRGB(140, 255, 96)
     local GLOW_SOFT = Color3.fromRGB(90, 255, 160)
+    local DARK_VORTEX = Color3.fromRGB(0, 150, 40)
     local ENTER_RADIUS = 5
     local MIN_OPEN = 3
 
@@ -3034,7 +3042,6 @@ Portal = (function()
         return look.Unit
     end
 
-    -- Small glowing ball helper used by every particle effect.
     local function spawnBall(size, color, transparency)
         local p = Instance.new("Part")
         p.Size = Vector3.new(size, size, size)
@@ -3048,54 +3055,58 @@ Portal = (function()
         return p
     end
 
-    -- Procedural portal built from glowing neon parts: an oval frame, a
-    -- spinning pinwheel vortex and a soft energy core. Parts render on
-    -- every device, even where GUI images do not.
     local function buildAssembly(face)
         local mainList = {}
         local innerList = {}
         local staticList = {}
+        local coreList = {}
+        local coronaList = {}
 
-        local function add(list, part, localCFrame)
-            table.insert(list, { part = part, cf = localCFrame })
+        local function add(list, part, localCFrame, extra)
+            local e = { part = part, cf = localCFrame }
+            if extra then
+                for k, v in pairs(extra) do e[k] = v end
+            end
+            table.insert(list, e)
         end
 
-        -- The inside is filled with a dense grid of glowing balls - plain
-        -- Parts, which render on every executor - forming a solid oval of
-        -- green portal liquid: dark edge -> green body -> hot lime core.
         local function liquidFill()
-            local rx = 3.3
-            local ry = 3.9
-            local step = 0.48
+            local rx = 3.4
+            local ry = 4.0
+            local step = 0.42
             for y = -ry, ry, step do
                 for x = -rx, rx, step do
-                    local rr = math.sqrt((x / rx) ^ 2 + (y / ry) ^ 2)
+                    local nx = x / rx
+                    local ny = y / ry
+                    local rr = math.sqrt(nx * nx + ny * ny)
                     if rr <= 1 then
-                        local col, tr
-                        if rr > 0.78 then
+                        local col, tr, sz
+                        if rr > 0.82 then
                             col = Color3.fromRGB(18, 118, 40)
-                            tr = 0.12
-                        elseif rr > 0.55 then
-                            col = Color3.fromRGB(36, 168, 46)
                             tr = 0.08
-                        elseif rr > 0.32 then
-                            col = Color3.fromRGB(88, 214, 58)
-                            tr = 0.06
+                            sz = 0.58
+                        elseif rr > 0.60 then
+                            col = Color3.fromRGB(38, 172, 46)
+                            tr = 0.04
+                            sz = 0.62
+                        elseif rr > 0.35 then
+                            col = Color3.fromRGB(92, 218, 58)
+                            tr = 0.03
+                            sz = 0.64
                         else
                             col = Color3.fromRGB(190, 255, 145)
-                            tr = 0.08
+                            tr = 0.06
+                            sz = 0.66
                         end
-                        local p = spawnBall(0.62, col, tr)
+                        local p = spawnBall(sz, col, tr)
                         p.Parent = face
-                        add(staticList, p, CFrame.new(x, y, 0.05))
+                        add(staticList, p, CFrame.new(x, y, 0.05), { baseTr = tr, phase = x * 1.3 + y * 0.9, isLiquid = true })
                     end
                 end
             end
         end
         liquidFill()
 
-        -- Smooth bright rim: thin rods laid along the tangent, forming a
-        -- continuous glowing outline instead of spaced dots.
         for i = 1, 44 do
             local a = (i - 1) / 44 * math.pi * 2
             local px = math.cos(a) * 4.3
@@ -3111,17 +3122,24 @@ Portal = (function()
             p.Transparency = 0
             p.Parent = face
             local pos = Vector3.new(px, py, 0.1)
-            add(staticList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
+            add(staticList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)), { isRim = true })
         end
 
-        -- Dark swirling arms over the bright disc: the classic portal
-        -- vortex. Thicker and denser than before so the swirl is obvious.
+        for i = 1, 24 do
+            local a = (i - 1) / 24 * math.pi * 2
+            local px = math.cos(a) * 4.9
+            local py = math.sin(a) * 5.3
+            local p = spawnBall(0.34, GLOW_SOFT, 0.25)
+            p.Parent = face
+            add(coronaList, p, CFrame.new(px, py, 0.02), { phase = a * 2 })
+        end
+
         for arm = 1, 3 do
             local base = (arm - 1) / 3 * math.pi * 2
-            for i = 1, 11 do
-                local t = i / 11
-                local a = base + t * 2.6
-                local r = 0.6 + t * 3.4
+            for j = 1, 12 do
+                local t = j / 12
+                local a = base + t * 2.7
+                local r = 0.5 + t * 3.5
                 local px = math.cos(a) * r
                 local py = math.sin(a) * r * 1.09
                 local tx = -math.sin(a) * r
@@ -3131,7 +3149,7 @@ Portal = (function()
                 p.Anchored = true
                 p.CanCollide = false
                 p.Material = Enum.Material.Neon
-                p.Color = Color3.fromRGB(0, 150, 40)
+                p.Color = DARK_VORTEX
                 p.Transparency = 0.1
                 p.Parent = face
                 local pos = Vector3.new(px, py, 0.35)
@@ -3139,34 +3157,49 @@ Portal = (function()
             end
         end
 
-        -- Inner bright counter-swirl for depth.
         for arm = 1, 3 do
             local base = (arm - 1) / 3 * math.pi * 2
-            for i = 1, 7 do
-                local t = i / 7
-                local a = base + t * 2.2
-                local r = 0.4 + t * 1.9
+            for j = 1, 8 do
+                local t = j / 8
+                local a = base + t * 2.3
+                local r = 0.35 + t * 2.0
                 local px = math.cos(a) * r
                 local py = math.sin(a) * r * 1.09
                 local tx = -math.sin(a) * r
                 local ty = math.cos(a) * r * 1.09
                 local p = Instance.new("Part")
-                p.Size = Vector3.new(0.14, 0.14, 1.7 - t * 1.0)
+                p.Size = Vector3.new(0.14, 0.14, 1.8 - t * 1.1)
                 p.Anchored = true
                 p.CanCollide = false
                 p.Material = Enum.Material.Neon
                 p.Color = GLOW_SOFT
                 p.Transparency = 0.12
                 p.Parent = face
-                local pos = Vector3.new(px, py, 0.3)
+                local pos = Vector3.new(px, py, 0.30)
                 add(innerList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
             end
         end
 
-        return { main = mainList, inner = innerList, static = staticList }
+        local core = spawnBall(1.55, Color3.fromRGB(200, 255, 150), 0.05)
+        core.Parent = face
+        add(coreList, core, CFrame.new(0, 0, 0.12), { baseSize = 1.55, phase = 0 })
+
+        local core2 = spawnBall(0.85, Color3.fromRGB(120, 235, 70), 0.10)
+        core2.Parent = face
+        add(coreList, core2, CFrame.new(0, 0, 0.18), { baseSize = 0.85, phase = 1.7 })
+
+        for i = 1, 12 do
+            local a = (i - 1) / 12 * math.pi * 2
+            local px = math.cos(a) * 1.9
+            local py = math.sin(a) * 2.07
+            local p = spawnBall(0.22, GLOW, 0.18)
+            p.Parent = face
+            add(staticList, p, CFrame.new(px, py, 0.08), { isInnerRing = true, phase = a })
+        end
+
+        return { main = mainList, inner = innerList, static = staticList, core = coreList, corona = coronaList }
     end
 
-    -- Scattering burst of neon parts (opening) or implosion (closing).
     local function burst(center, count, inward)
         for _ = 1, (count or 12) do
             task.spawn(function()
@@ -3200,21 +3233,20 @@ Portal = (function()
         end
     end
 
-    -- Sparks that orbit the portal while it is open.
     local function orbit(center)
         task.spawn(function()
             local orbiters = {}
-            for i = 1, 10 do
+            for i = 1, 12 do
                 orbiters[i] = {
                     part = spawnBall(0.28),
-                    phase = (i - 1) / 10 * math.pi * 2,
-                    radius = RNG:NextNumber(4.6, 6.4),
+                    phase = (i - 1) / 12 * math.pi * 2,
+                    radius = RNG:NextNumber(4.6, 6.6),
                     height = RNG:NextNumber(-3.2, 3.2),
-                    speed = RNG:NextNumber(1.5, 2.5),
+                    speed = RNG:NextNumber(1.5, 2.7),
                 }
             end
             local t = 0
-            while t < 2.8 and orbiters[1].part.Parent do
+            while t < 3.2 and orbiters[1].part.Parent do
                 t = t + 0.05
                 for _, o in ipairs(orbiters) do
                     if o.part.Parent then
@@ -3224,7 +3256,7 @@ Portal = (function()
                             o.height,
                             math.sin(a) * o.radius
                         ))
-                        o.part.Transparency = math.min(1, o.part.Transparency + 0.02)
+                        o.part.Transparency = math.min(1, o.part.Transparency + 0.018)
                     end
                 end
                 task.wait(0.05)
@@ -3235,7 +3267,6 @@ Portal = (function()
         end)
     end
 
-    -- Embers rising from the base of the portal.
     local function embers(center)
         for _ = 1, 7 do
             task.spawn(function()
@@ -3258,7 +3289,92 @@ Portal = (function()
         end
     end
 
-    -- Big glowing plate that flares bright green and fades out.
+    local function bolt(center)
+        task.spawn(function()
+            local segs = RNG:NextNumber(4, 6)
+            local startPos = center.Position
+            local angle = RNG:NextNumber(0, math.pi * 2)
+            local radius = RNG:NextNumber(2.2, 4.2)
+            local endPos = startPos + Vector3.new(math.cos(angle) * radius, math.sin(angle) * radius * 1.09, 0)
+            local points = {}
+            points[1] = startPos
+            for i = 2, segs do
+                local t = (i - 1) / segs
+                local mid = startPos:Lerp(endPos, t)
+                mid = mid + Vector3.new(RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.2, 0.2))
+                points[i] = mid
+            end
+            points[segs + 1] = endPos
+            local parts = {}
+            for i = 1, segs do
+                local a = points[i]
+                local b = points[i + 1]
+                local dir = b - a
+                local dist = dir.Magnitude
+                if dist > 0.05 then
+                    local p = Instance.new("Part")
+                    p.Size = Vector3.new(0.08, 0.08, dist)
+                    p.Anchored = true
+                    p.CanCollide = false
+                    p.Material = Enum.Material.Neon
+                    p.Color = Color3.fromRGB(200, 255, 180)
+                    p.Transparency = 0.05
+                    p.CFrame = CFrame.new(a, b) * CFrame.new(0, 0, -dist / 2)
+                    p.Parent = workspace
+                    table.insert(parts, p)
+                end
+            end
+            task.wait(0.12)
+            for _, pr in ipairs(parts) do
+                if pr.Parent then pr:Destroy() end
+            end
+        end)
+    end
+
+    local function shimmerBurst(center)
+        for _ = 1, 6 do
+            task.spawn(function()
+                local p = spawnBall(RNG:NextNumber(0.12, 0.22), Color3.fromRGB(210, 255, 170), 0.1)
+                p.CFrame = center * CFrame.new(RNG:NextNumber(-1.8, 1.8), RNG:NextNumber(-2.2, 2.2), RNG:NextNumber(-0.2, 0.2))
+                local vel = Vector3.new(RNG:NextNumber(-0.6, 0.6), RNG:NextNumber(-0.6, 0.6), 0)
+                local t = 0
+                while t < 0.9 and p.Parent do
+                    t = t + 0.04
+                    p.CFrame = p.CFrame * CFrame.new(vel * 0.12)
+                    p.Transparency = math.min(1, 0.1 + t)
+                    task.wait(0.04)
+                end
+                if p.Parent then p:Destroy() end
+            end)
+        end
+    end
+
+    local function energyPulse(center, inward)
+        task.spawn(function()
+            local ring = Instance.new("Part")
+            ring.Shape = Enum.PartType.Ball
+            ring.Size = Vector3.new(0.5, 0.5, 0.5)
+            ring.Anchored = true
+            ring.CanCollide = false
+            ring.Material = Enum.Material.Neon
+            ring.Color = GLOW
+            ring.Transparency = 0.15
+            ring.CFrame = center
+            ring.Parent = workspace
+            local t = 0
+            local maxS = inward and 0.5 or 9
+            local startS = inward and 9 or 0.5
+            while t < 1 and ring.Parent do
+                t = t + 0.05
+                local s = startS + (maxS - startS) * (inward and (1 - (1 - t) ^ 2) or (t ^ 0.7))
+                ring.Size = Vector3.new(s, s * 1.09, 0.4)
+                ring.Transparency = 0.15 + t * 0.85
+                task.wait(0.05)
+            end
+            if ring.Parent then ring:Destroy() end
+        end)
+    end
+
     local function flash(center)
         task.spawn(function()
             local plate = Instance.new("Part")
@@ -3273,29 +3389,29 @@ Portal = (function()
             local light = Instance.new("PointLight")
             light.Color = GLOW
             light.Brightness = 0
-            light.Range = 18
+            light.Range = 20
             light.Parent = plate
             local t = 0
-            while t < 0.55 and plate.Parent do
+            while t < 0.6 and plate.Parent do
                 t = t + 0.03
                 local a = math.clamp(1 - math.abs(t - 0.22) / 0.22, 0, 1)
                 plate.Transparency = 1 - a * 0.85
-                light.Brightness = a * 6
+                light.Brightness = a * 7
                 task.wait(0.03)
             end
             if plate.Parent then plate:Destroy() end
         end)
     end
 
-    -- Ambient life while the portal is open: the whole neon assembly
-    -- spins around the portal axis, the glow breathes, the image shimmers
-    -- and embers keep rising.
-    local function ambient(face, glow, frontImage, center, assembly)
+    local function ambient(face, glow, halo, frontImage, center, assembly, instant)
         task.spawn(function()
             local t = 0
             local spin = 0
-            local grow = 0
+            local grow = instant and 1 or 0
             local nextEmbers = 0.4
+            local nextBolt = 0.7
+            local nextShimmer = 0.5
+            local nextPulse = 1.2
             local function place(list, delta)
                 for _, entry in ipairs(list) do
                     if entry.part.Parent then
@@ -3305,31 +3421,91 @@ Portal = (function()
                     end
                 end
             end
+            if instant then
+                place(assembly.main, 0)
+                place(assembly.inner, 0)
+                place(assembly.static, 0)
+                place(assembly.corona, 0)
+                for _, entry in ipairs(assembly.core) do
+                    if entry.part.Parent then
+                        entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
+                    end
+                end
+                assembly.staticDone = true
+            end
             while face.Parent do
                 if config.Animations then
                     t = t + 0.05
-                    spin = spin + 0.11
-                    grow = math.min(1, grow + 0.055)
+                    spin = spin + 0.13
+                    if not instant then
+                        grow = math.min(1, grow + 0.06)
+                    end
                     place(assembly.main, spin)
                     place(assembly.inner, -spin * 1.7)
-                    -- Place the static fill while it grows, then one final
-                    -- time at full size (keeps it cheap to run).
-                    if grow < 1 then
-                        place(assembly.static, 0)
-                    elseif not assembly.staticDone then
-                        place(assembly.static, 0)
-                        assembly.staticDone = true
+                    if not instant then
+                        if grow < 1 then
+                            place(assembly.static, 0)
+                            place(assembly.corona, 0)
+                        elseif not assembly.staticDone then
+                            place(assembly.static, 0)
+                            place(assembly.corona, 0)
+                            assembly.staticDone = true
+                        end
+                    end
+                    for _, entry in ipairs(assembly.core) do
+                        if entry.part.Parent then
+                            local s = entry.baseSize * (1 + math.sin(t * 3.2 + entry.phase) * 0.14)
+                            entry.part.Size = Vector3.new(s, s, s)
+                            if not instant then
+                                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position * grow)
+                            else
+                                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
+                            end
+                            entry.part.Transparency = 0.05 + math.sin(t * 2.8 + entry.phase) * 0.04
+                        end
+                    end
+                    for _, entry in ipairs(assembly.corona) do
+                        if entry.part.Parent then
+                            local base = entry.cf.Position
+                            local wob = math.sin(t * 2.1 + entry.phase) * 0.12
+                            local pos = instant and (base + Vector3.new(wob, wob * 0.6, 0)) or (base * grow + Vector3.new(wob, wob * 0.6, 0))
+                            entry.part.CFrame = face.CFrame * CFrame.new(pos)
+                            entry.part.Transparency = 0.25 + math.sin(t * 2.6 + entry.phase) * 0.15
+                        end
+                    end
+                    for _, entry in ipairs(assembly.static) do
+                        if entry.isLiquid and entry.part.Parent then
+                            entry.part.Transparency = math.clamp(entry.baseTr + math.sin(t * 2.4 + entry.phase) * 0.06, 0, 1)
+                        end
                     end
                     if glow.Parent then
-                        glow.Brightness = 4 + math.sin(t * 2.6) * 1.3
+                        glow.Brightness = 5 + math.sin(t * 2.9) * 1.6
+                    end
+                    if halo and halo.Parent then
+                        halo.Brightness = 2 + math.sin(t * 1.7) * 0.7
                     end
                     if frontImage and frontImage.Parent then
-                        frontImage.Transparency = 0.06 + math.sin(t * 5) * 0.06
+                        frontImage.Transparency = 0.05 + math.sin(t * 5.2) * 0.05
                     end
                     nextEmbers = nextEmbers - 0.05
                     if nextEmbers <= 0 then
-                        nextEmbers = RNG:NextNumber(0.6, 1.2)
+                        nextEmbers = RNG:NextNumber(0.5, 1.0)
                         embers(center)
+                    end
+                    nextBolt = nextBolt - 0.05
+                    if nextBolt <= 0 then
+                        nextBolt = RNG:NextNumber(0.6, 1.3)
+                        bolt(center)
+                    end
+                    nextShimmer = nextShimmer - 0.05
+                    if nextShimmer <= 0 then
+                        nextShimmer = RNG:NextNumber(0.7, 1.4)
+                        shimmerBurst(center)
+                    end
+                    nextPulse = nextPulse - 0.05
+                    if nextPulse <= 0 then
+                        nextPulse = RNG:NextNumber(1.8, 3.0)
+                        energyPulse(center, false)
                     end
                 end
                 task.wait(0.05)
@@ -3352,10 +3528,196 @@ Portal = (function()
         face.Parent = workspace
         lastPortal = face
 
-        -- The image is a Decal on both faces. The plate stays 99%
-        -- transparent (effectively invisible), and that is exactly what
-        -- lets Roblox render the decal: a fully transparent part hides
-        -- its decals, 0.99 keeps them visible.
+        local decalFront = Instance.new("Decal")
+        decalFront.Name = "PortalImage"
+        decalFront.Texture = IMG
+        decalFront.Face = Enum.NormalId.Front
+        decalFront.Transparency = 0
+        decalFront.Parent = face
+
+        local decalBack = Instance.new("Decal")
+        decalBack.Name = "PortalImageBack"
+        decalBack.Texture = IMG
+        decalBack.Face = Enum.NormalId.Back
+        decalBack.Transparency = 0
+        decalBack.Parent = face
+
+        lastImages.front = decalFront
+        lastImages.back = decalBack
+
+        local glow = Instance.new("PointLight")
+        glow.Color = GLOW
+        glow.Brightness = 5
+        glow.Range = 18
+        glow.Parent = face
+
+        local halo = Instance.new("PointLight")
+        halo.Color = GLOW_SOFT
+        halo.Brightness = 2
+        halo.Range = 32
+        halo.Parent = face
+
+        if not quiet then
+            playSound(OPEN_SOUND, 1, face)
+            flash(cf)
+            burst(cf, 18)
+            orbit(cf)
+            energyPulse(cf, false)
+            task.delay(0.15, function()
+                if face.Parent then
+                    burst(cf, 10)
+                    shimmerBurst(cf)
+                end
+            end)
+        end
+
+        lastAssembly = buildAssembly(face)
+
+        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = Vector3.new(7.0, 7.6, 0.3),
+        })
+
+        ambient(face, glow, halo, lastImages.front, cf, lastAssembly, false)
+
+        task.delay(12, function()
+            if face == lastPortal and face.Parent then
+                face:Destroy()
+                lastPortal = nil
+            end
+        end)
+
+        return face
+    end
+
+    local function closePortal(face)
+        if not face or not face.Parent then return end
+        playSound(CLOSE_SOUND, 1, face)
+        burst(face.CFrame, 16, true)
+        energyPulse(face.CFrame, true)
+        flash(face.CFrame)
+        tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = Vector3.new(0.3, 0.3, 0.3),
+        })
+        for _, img in pairs({ lastImages.front, lastImages.back }) do
+            if img and img.Parent then
+                tween(img, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                    Transparency = 1,
+                })
+            end
+        end
+        if lastAssembly then
+            for _, listName in ipairs({ "main", "inner", "static", "core", "corona" }) do
+                local list = lastAssembly[listName]
+                if list then
+                    for _, entry in ipairs(list) do
+                        if entry.part.Parent then
+                            tween(entry.part, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                                Transparency = 1,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+        task.delay(0.75, function()
+            if face.Parent then face:Destroy() end
+            if face == lastPortal then lastPortal = nil end
+        end)
+    end
+
+    local function autoWalk(portalPos)
+        local hum = humanoid()
+        if not hum or hum.Health <= 0 then return end
+        pcall(function()
+            hum.Sit = false
+            hum.WalkSpeed = math.max(tonumber(hum.WalkSpeed) or 16, 16)
+            hum:MoveTo(portalPos)
+        end)
+    end
+
+    local function gate(token)
+        if currentTheme ~= "RICK AND MORTY" then return end
+        local base = Vector3.new(0, 12, 0)
+        local r = root()
+        if r then base = r.Position end
+        if not r and workspace.CurrentCamera then
+            base = workspace.CurrentCamera.CFrame.Position
+        end
+        local fwd = forwardVector()
+        local pos = base + fwd * 7 + Vector3.new(0, 4.6, 0)
+        local cf = CFrame.new(pos, pos + fwd)
+        openPortal(cf)
+        setStatus("portal open — " .. MIN_OPEN .. "s (walk in for instant)")
+        notify("Portal open — walk in to jump early", GLOW)
+        local openedAt = os.clock()
+        local entered = false
+        local walking = false
+        local lastMoveAt = 0
+        local stuckPos = nil
+        local stuckAt = 0
+        while hopStillActive(token) and (os.clock() - openedAt) < MIN_OPEN do
+            sessionStats.lastHopStart = os.clock()
+            local rp = root()
+            if config.PortalGate and not walking and (os.clock() - openedAt) >= 0.5 then
+                walking = true
+                stuckPos = rp and rp.Position or nil
+                stuckAt = os.clock()
+                lastMoveAt = os.clock()
+                setStatus("portal open — walking in (" .. math.ceil(MIN_OPEN - (os.clock() - openedAt)) .. "s)")
+                autoWalk(pos)
+            end
+            if walking and rp and (os.clock() - lastMoveAt) > 0.6 then
+                lastMoveAt = os.clock()
+                autoWalk(pos)
+                if stuckPos and (rp.Position - stuckPos).Magnitude < 0.9 and (os.clock() - stuckAt) > 3 then
+                    walking = false
+                else
+                    stuckPos = rp and rp.Position or nil
+                    stuckAt = os.clock()
+                end
+            end
+            if rp and (rp.Position - pos).Magnitude < ENTER_RADIUS then
+                entered = true
+                break
+            end
+            task.wait(0.1)
+        end
+        if entered then
+            setStatus("portal entered — teleporting now")
+            notify("Portal entered!", GLOW)
+            local last = lastPortal
+            if last and last.Parent then
+                flash(last.CFrame)
+                burst(last.CFrame, 12)
+                energyPulse(last.CFrame, false)
+            end
+        end
+        if not hopStillActive(token) then
+            cleanup()
+        end
+    end
+
+    local function sealBehind()
+        local base = Vector3.new(0, 12, 0)
+        local r = root()
+        if r then base = r.Position end
+        local behind = -forwardVector()
+        local pos = base + behind * 5 + Vector3.new(0, 4.6, 0)
+        local cf = CFrame.new(pos, pos + behind)
+        cleanup()
+        local face = Instance.new("Part")
+        face.Name = "SF_Portal"
+        face.Size = Vector3.new(7.0, 7.6, 0.3)
+        face.Anchored = true
+        face.CanCollide = false
+        face.CanQuery = false
+        face.Material = Enum.Material.Plastic
+        face.Color = Color3.fromRGB(0, 0, 0)
+        face.Transparency = 0.99
+        face.CFrame = cf
+        face.Parent = workspace
+        lastPortal = face
+
         local decalFront = Instance.new("Decal")
         decalFront.Name = "PortalImage"
         decalFront.Texture = IMG
@@ -3382,128 +3744,34 @@ Portal = (function()
         local halo = Instance.new("PointLight")
         halo.Color = GLOW_SOFT
         halo.Brightness = 1.5
-        halo.Range = 30
+        halo.Range = 28
         halo.Parent = face
 
-        if not quiet then
-            playSound(OPEN_SOUND, 1, face)
-            burst(cf, 16)
-            flash(cf)
-            orbit(cf)
-        end
-
-        -- Neon portal frame (always visible) + image as an extra layer.
         lastAssembly = buildAssembly(face)
-
-        -- Opening animation: the plate carrying the image grows from a
-        -- point to full size while the neon frame spins up.
-        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = Vector3.new(7.0, 7.6, 0.3),
-        })
-
-        ambient(face, glow, lastImages.front, cf, lastAssembly)
-
-        task.delay(12, function()
-            if face == lastPortal and face.Parent then
-                face:Destroy()
-                lastPortal = nil
-            end
-        end)
-
-        return face
-    end
-
-    -- Closing: particles implode, the image fades and the plate collapses.
-    local function closePortal(face)
-        if not face or not face.Parent then return end
-        playSound(CLOSE_SOUND, 1, face)
-        burst(face.CFrame, 14, true)
-        tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Size = Vector3.new(0.3, 0.3, 0.3),
-        })
-        for _, img in pairs({ lastImages.front, lastImages.back }) do
-            if img and img.Parent then
-                tween(img, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                    Transparency = 1,
-                })
-            end
-        end
-        for _, list in ipairs({ lastAssembly and lastAssembly.main or {}, lastAssembly and lastAssembly.inner or {}, lastAssembly and lastAssembly.static or {} }) do
-            for _, entry in ipairs(list) do
-                if entry.part.Parent then
-                    tween(entry.part, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                        Transparency = 1,
-                    })
+        lastAssembly.staticDone = true
+        for _, listName in ipairs({ "main", "inner", "static", "corona" }) do
+            local list = lastAssembly[listName]
+            if list then
+                for _, entry in ipairs(list) do
+                    if entry.part.Parent then
+                        entry.part.CFrame = face.CFrame * entry.cf
+                    end
                 end
             end
         end
-        task.delay(0.75, function()
-            if face.Parent then face:Destroy() end
-            if face == lastPortal then lastPortal = nil end
-        end)
-    end
-
-    local function gate(token)
-        if currentTheme ~= "RICK AND MORTY" then return end
-        local base = Vector3.new(0, 12, 0)
-        local r = root()
-        if r then base = r.Position end
-        if not r and workspace.CurrentCamera then
-            base = workspace.CurrentCamera.CFrame.Position
-        end
-        local fwd = forwardVector()
-        local pos = base + fwd * 7 + Vector3.new(0, 4.6, 0)
-        local cf = CFrame.new(pos, pos + fwd)
-        openPortal(cf)
-        setStatus("portal open — teleporting in " .. MIN_OPEN .. "s")
-        notify("Portal open — teleporting in " .. MIN_OPEN .. "s", GLOW)
-        local openedAt = os.clock()
-        local entered = false
-        -- The teleport always fires on time and is never blocked. Walking
-        -- into the portal only triggers it instantly (a bonus, not a
-        -- gate), so a PvP server can never stall the hop.
-        while hopStillActive(token) and (os.clock() - openedAt) < MIN_OPEN do
-            sessionStats.lastHopStart = os.clock()
-            if config.PortalGate then
-                local rp = root()
-                if rp and (rp.Position - pos).Magnitude < ENTER_RADIUS then
-                    entered = true
-                    break
-                end
-            end
-            task.wait(0.1)
-        end
-        if entered then
-            setStatus("portal entered — teleporting now")
-            notify("Portal entered!", GLOW)
-            local last = lastPortal
-            if last and last.Parent then
-                flash(last.CFrame)
-                burst(last.CFrame, 10)
+        for _, entry in ipairs(lastAssembly.core) do
+            if entry.part.Parent then
+                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
             end
         end
-        if not hopStillActive(token) then
-            cleanup()
-        end
-    end
 
-    -- Arrival: portal behind the player that seals itself.
-    local function sealBehind()
-        local base = Vector3.new(0, 12, 0)
-        local r = root()
-        if r then base = r.Position end
-        local behind = -forwardVector()
-        local pos = base + behind * 5 + Vector3.new(0, 4.6, 0)
-        local cf = CFrame.new(pos, pos + behind)
-        local face = openPortal(cf, true)
-        orbit(cf)
-        task.delay(1.6, function()
+        ambient(face, glow, halo, lastImages.front, cf, lastAssembly, true)
+
+        task.delay(1.8, function()
             closePortal(face)
         end)
     end
 
-    -- Warm the client image cache so the portal picture is already
-    -- downloaded when the portal opens (some devices need a few seconds).
     local function preloadImage()
         pcall(function()
             local warm = Instance.new("ImageLabel")
@@ -3844,8 +4112,9 @@ task.spawn(function()
     end
 end)
 
--- If we just landed through a portal hop, seal a closing portal behind
--- the player (Rick and Morty theme), then clear the arrival marker.
+-- On arrival: if we just teleported through our own portal, show the
+-- portal behind the player instantly (no opening animation) and then
+-- seal it. This fixes the illogical "portal opens after you arrived".
 task.spawn(function()
     if currentTheme ~= "RICK AND MORTY" or not canReadFile("ServerFinderPortal.json") then
         return
@@ -3859,7 +4128,7 @@ task.spawn(function()
     end)
     pcall(function() writefile("ServerFinderPortal.json", "") end)
     if not stale then
-        task.wait(1)
+        task.wait(0.8)
         if guiAlive and Portal then
             Portal.sealBehind()
         end
