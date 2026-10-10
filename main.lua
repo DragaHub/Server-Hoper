@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.24"
+local VERSION = "2.25"
 
 local guiAlive = true
 local isHopping = false
@@ -1014,27 +1014,66 @@ local GuiFX = (function()
         return x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y
     end
 
-    local function track(input)
-        local raw = input.Position
-        local inset = topInset()
-        if hovered and hovered.Parent then
-            local rawIn = rectHas(hovered, raw.X, raw.Y)
-            local insetIn = rectHas(hovered, raw.X, raw.Y + inset)
-            if insetIn and not rawIn then
-                pointerDY = inset
-            elseif rawIn and not insetIn then
-                pointerDY = 0
-            end
+    -- GetMouseLocation() reports the cursor in the same space as a ScreenGui
+    -- with IgnoreGuiInset = true, so no manual topbar correction is applied.
+    local function track()
+        local ok, loc = pcall(function() return UserInputService:GetMouseLocation() end)
+        if ok and typeof(loc) == "Vector2" then
+            pointer = loc
         end
-        pointer = Vector2.new(raw.X, raw.Y + (pointerDY or inset))
-        return pointer
+        return pointer or Vector2.new(0, 0)
     end
 
+    -- Hover: a thin outline that fades in around the button.
     local function setHovered(button, state)
         if state then
             hovered = button
-        elseif hovered == button then
-            hovered = nil
+            if on() and not button:FindFirstChild("FXStroke") then
+                local st = Instance.new("UIStroke")
+                st.Name = "FXStroke"
+                st.Color = P()
+                st.Thickness = 1
+                st.Transparency = 1
+                st.Parent = button
+                tween(st, TweenInfo.new(0.15), { Transparency = 0.2 })
+            end
+        else
+            if hovered == button then hovered = nil end
+            local st = button:FindFirstChild("FXStroke")
+            if st then
+                tween(st, TweenInfo.new(0.2), { Transparency = 1 })
+                task.delay(0.22, function() safeDestroy(st) end)
+            end
+        end
+    end
+
+    -- Pixel dissolve: squares fly outward from the window edges on open.
+    local function openBurst(frame)
+        if not on() or not frame.Parent then return end
+        local p, s = frame.AbsolutePosition, frame.AbsoluteSize
+        local cx, cy = p.X + s.X / 2, p.Y + s.Y / 2
+        for _ = 1, 24 do
+            local side = RNG:NextInteger(1, 4)
+            local x, y
+            if side == 1 then
+                x, y = p.X + RNG:NextNumber() * s.X, p.Y
+            elseif side == 2 then
+                x, y = p.X + RNG:NextNumber() * s.X, p.Y + s.Y
+            elseif side == 3 then
+                x, y = p.X, p.Y + RNG:NextNumber() * s.Y
+            else
+                x, y = p.X + s.X, p.Y + RNG:NextNumber() * s.Y
+            end
+            local dx, dy = x - cx, y - cy
+            local n = math.max(1, math.sqrt(dx * dx + dy * dy))
+            local sp = RNG:NextNumber(60, 140)
+            particle(layer, {
+                x = x, y = y,
+                vx = dx / n * sp, vy = dy / n * sp,
+                drag = 3, life = RNG:NextNumber(0.4, 0.7),
+                size = RNG:NextInteger(3, 5), color = P(),
+                spin = RNG:NextNumber(-300, 300), fade = 1.5,
+            })
         end
     end
 
@@ -1144,6 +1183,7 @@ local GuiFX = (function()
         startDust()
         startRain()
         cursorTrail()
+        task.delay(0.42, function() openBurst(frame) end)
     end
 
     return {
@@ -1151,6 +1191,7 @@ local GuiFX = (function()
         clickSpark = clickSpark,
         clickRing = clickRing,
         setHovered = setHovered,
+        openBurst = openBurst,
         chargeStart = chargeStart,
         chargeStop = chargeStop,
         hoverSpark = hoverSpark,
@@ -2055,7 +2096,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.24
+> SERVER FINDER v2.25
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
