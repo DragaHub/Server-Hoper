@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.25"
+local VERSION = "2.26"
 
 local guiAlive = true
 local isHopping = false
@@ -645,6 +645,8 @@ end
 -- ============================================================
 local GuiFX = (function()
     local FX_CAP = 90
+    -- Click burst shape: "streak" = elongated sparks along their motion, "square" = classic squares.
+    local CLICK_STYLE = "streak"
     local liveCount = 0
     local layer = nil
     local trailLast = 0
@@ -682,9 +684,9 @@ local GuiFX = (function()
         task.spawn(function()
             local a0 = spec.alpha0 or 0
             local f = square(parent, spec.w or spec.size, spec.h or spec.size, spec.color, a0)
-            f.Rotation = spec.rot or 0
             local x, y, vx, vy = spec.x, spec.y, spec.vx, spec.vy
             local drag = spec.drag or 0
+            local fade = spec.fade or 1
             local t = 0
             local life = spec.life
             while t < life and f.Parent and guiAlive do
@@ -694,9 +696,16 @@ local GuiFX = (function()
                 vx = vx * (1 - drag * dt)
                 x = x + vx * dt
                 y = y + vy * dt
-                f.Position = UDim2.fromOffset(x, y)
-                f.Rotation = f.Rotation + (spec.spin or 0) * dt
-                f.BackgroundTransparency = math.clamp(a0 + (1 - a0) * (t / life) ^ (spec.fade or 1), 0, 1)
+                -- Screen-space coordinates -> the layer's own coordinates, so
+                -- the effect lands where it was spawned regardless of layer origin.
+                local lp = parent.AbsolutePosition
+                f.Position = UDim2.fromOffset(x - lp.X, y - lp.Y)
+                if spec.streak then
+                    f.Rotation = math.deg(math.atan2(vy, vx))
+                else
+                    f.Rotation = f.Rotation + (spec.spin or 0) * dt
+                end
+                f.BackgroundTransparency = math.clamp(a0 + (1 - a0) * (t / life) ^ fade, 0, 1)
             end
             liveCount = liveCount - 1
             safeDestroy(f)
@@ -752,34 +761,36 @@ local GuiFX = (function()
         return nil
     end
 
-    -- Sparks burst from the pointer when it sits on the button, else from the button centre.
+    -- Click burst anchored to the button centre (no mouse maths involved).
     local function clickSpark(button)
         if not on() or not button.Parent then return end
-        local x, y = pointerIn(button)
-        if not x then x, y = center(button) end
+        local x, y = center(button)
         local color = P()
+        local streak = CLICK_STYLE == "streak"
         for i = 1, 12 do
             local a = (i - 1) / 12 * math.pi * 2 + RNG:NextNumber(-0.2, 0.2)
-            local sp = RNG:NextNumber(90, 190)
+            local sp = RNG:NextNumber(110, 220)
             particle(layer, {
                 x = x, y = y,
                 vx = math.cos(a) * sp, vy = math.sin(a) * sp,
                 drag = 2.5, life = RNG:NextNumber(0.35, 0.6),
                 size = RNG:NextInteger(3, 5),
+                w = streak and RNG:NextInteger(10, 16) or nil,
+                h = streak and 2 or nil,
+                streak = streak,
                 color = (i % 3 == 0) and WHITE or color,
                 spin = RNG:NextNumber(-600, 600), fade = 1.5,
             })
         end
     end
 
-    -- Expanding outline ring at the click point.
+    -- Expanding outline ring at the button centre.
     local function clickRing(button)
         if not on() or not button.Parent then return end
-        local x, y = pointerIn(button)
-        if not x then x, y = center(button) end
+        local x, y = center(button)
         local ring = Instance.new("Frame")
         ring.AnchorPoint = Vector2.new(0.5, 0.5)
-        ring.Position = UDim2.fromOffset(x, y)
+        ring.Position = UDim2.fromOffset(x - layer.AbsolutePosition.X, y - layer.AbsolutePosition.Y)
         ring.Size = UDim2.fromOffset(8, 8)
         ring.BackgroundTransparency = 1
         ring.BorderSizePixel = 0
@@ -1088,8 +1099,7 @@ local GuiFX = (function()
             while charge == token and guiAlive and button.Parent and t < 1.2 do
                 local dt = task.wait(1 / 30)
                 t = t + dt
-                local x, y = pointerIn(button)
-                if not x then x, y = center(button) end
+                local x, y = center(button)
                 local a = RNG:NextNumber(0, math.pi * 2)
                 local r = RNG:NextNumber(40, 64)
                 local life = 0.3
@@ -2096,7 +2106,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.25
+> SERVER FINDER v2.26
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
