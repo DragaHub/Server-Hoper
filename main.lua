@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.20"
+local VERSION = "2.21"
 
 local guiAlive = true
 local isHopping = false
@@ -1518,7 +1518,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.20
+> SERVER FINDER v2.21
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -2967,16 +2967,15 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- RICK AND MORTY PORTAL (v2.20)
--- Front: opens 3s before teleport with growth anim, flash, glow,
--- orbit, embers, bolts, shimmer, pulse. Solid oval filled with
--- dense green liquid (balls), bright rim, corona, dark vortex,
--- inner swirl, pulsating core. Entry optional (instant jump),
--- auto-walk optional and never blocks.
--- Arrival: portal behind player appears instantly at full size
--- (NO opening animation) and then seals with implosion/close
--- sound. This fixes the illogical "portal opens after arrival".
--- No shockwave rings.
+-- RICK AND MORTY PORTAL (v2.21)
+-- One model per portal (all pieces + sparks destroyed together), one
+-- update loop, capped spark count, build spread over frames.
+-- Front: opens 3s before teleport (solid green liquid oval, chasing rim,
+-- corona, vortex arms, pulsing core, vortex streams, bolts, glints).
+-- Walking in = instant jump; otherwise teleports on time. Collapses
+-- BEFORE the teleport call, so no closing animation during loading.
+-- Arrival: portal behind player at full size, no opening animation,
+-- then collapses. No shockwave rings.
 -- ============================================================
 Portal = (function()
     local IMG = "rbxassetid://104310499688141"
@@ -2984,34 +2983,43 @@ Portal = (function()
     local CLOSE_SOUND = "rbxassetid://79092478163364"
     local GLOW = Color3.fromRGB(140, 255, 96)
     local GLOW_SOFT = Color3.fromRGB(90, 255, 160)
-    local DARK_VORTEX = Color3.fromRGB(0, 150, 40)
+    local LIME = Color3.fromRGB(200, 255, 150)
+    local DARK = Color3.fromRGB(0, 150, 40)
+    local HOT = Color3.fromRGB(235, 255, 215)
     local ENTER_RADIUS = 5
     local MIN_OPEN = 3
+    local FRAME = 1 / 30
+    local OPEN_TIME = 0.9
+    local CLOSE_TIME = 0.45
+    local FX_CAP = 80
+    local BUILD_BATCH = 40
 
-    local lastPortal = nil
-    local lastImages = { front = nil, back = nil }
-    local lastAssembly = nil
+    local current = nil
+    local serial = 0
 
-    local function cleanup()
-        if lastPortal and lastPortal.Parent then
-            pcall(function() lastPortal:Destroy() end)
+    local function safeDestroy(inst)
+        if inst then
+            pcall(function() inst:Destroy() end)
         end
-        lastPortal = nil
-        lastImages.front = nil
-        lastImages.back = nil
-        lastAssembly = nil
     end
 
-    local function playSound(id, volume, parent)
+    -- Removes every leftover portal piece from the workspace.
+    local function sweep()
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child.Name == "SF_Portal" or child.Name == "SF_FX" then
+                safeDestroy(child)
+            end
+        end
+    end
+
+    local function playSound(id, parent)
         pcall(function()
             local s = Instance.new("Sound")
             s.SoundId = id
-            s.Volume = volume or 1
+            s.Volume = 1
             s.Parent = parent or workspace
             s:Play()
-            task.delay(6, function()
-                if s.Parent then s:Destroy() end
-            end)
+            task.delay(6, function() safeDestroy(s) end)
         end)
     end
 
@@ -3042,587 +3050,586 @@ Portal = (function()
         return look.Unit
     end
 
-    local function spawnBall(size, color, transparency)
+    -- Every portal piece is a plain neon Part (no SpecialMesh / SurfaceGui).
+    local function mk(cf, size, shape, color, tr, parent)
         local p = Instance.new("Part")
-        p.Size = Vector3.new(size, size, size)
-        p.Shape = Enum.PartType.Ball
+        p.Name = "SF_FX"
         p.Anchored = true
         p.CanCollide = false
+        p.CanTouch = false
+        p.CanQuery = false
+        p.CastShadow = false
         p.Material = Enum.Material.Neon
-        p.Color = color or GLOW
-        p.Transparency = transparency or 0
-        p.Parent = workspace
+        p.Color = color
+        p.Transparency = tr or 0
+        if shape then p.Shape = shape end
+        p.Size = size
+        p.CFrame = cf
+        p.Parent = parent
         return p
     end
 
-    local function buildAssembly(face)
-        local mainList = {}
-        local innerList = {}
-        local staticList = {}
-        local coreList = {}
-        local coronaList = {}
+    local function newSession(cf, instant)
+        serial = serial + 1
+        local model = Instance.new("Model")
+        model.Name = "SF_Portal"
+        model.Parent = workspace
+        local anchor = mk(cf, Vector3.new(0.2, 0.2, 0.2), nil, GLOW, 1, model)
+        anchor.Name = "SF_Anchor"
+        local glow = Instance.new("PointLight")
+        glow.Color = GLOW
+        glow.Brightness = 0
+        glow.Range = 18
+        glow.Parent = anchor
+        local halo = Instance.new("PointLight")
+        halo.Color = GLOW_SOFT
+        halo.Brightness = 0
+        halo.Range = 32
+        halo.Parent = anchor
+        return {
+            id = serial,
+            cf = cf,
+            anchor = anchor,
+            model = model,
+            glow = glow,
+            halo = halo,
+            alive = true,
+            ready = false,
+            instant = instant,
+            mode = instant and "hold" or "open",
+            grow = instant and 1 or 0,
+            k = instant and 1 or 0,
+            closeFrom = 1,
+            closeT = 0,
+            t = 0,
+            frame = 0,
+            n = 0,
+            corePulse = 0,
+            placed = false,
+            lastK = nil,
+            decals = {},
+            liquid = {},
+            rim = {},
+            dark = {},
+            inner = {},
+            corona = {},
+            core = {},
+            ring = {},
+            fx = {},
+            bolts = {},
+            nextSpiral = 0.2,
+            nextEmber = 0.5,
+            nextBolt = 0.7,
+            nextGlint = 0.4,
+            nextPulse = 2.0,
+        }
+    end
 
-        local function add(list, part, localCFrame, extra)
-            local e = { part = part, cf = localCFrame }
-            if extra then
-                for k, v in pairs(extra) do e[k] = v end
-            end
-            table.insert(list, e)
+    -- Spreads part creation across frames so building never hitches the client.
+    local function batch(S)
+        S.n = S.n + 1
+        if S.n % BUILD_BATCH == 0 then
+            task.wait()
+            if not S.alive then error("portal session stopped") end
+        end
+    end
+
+    local function reg(S, list, p, data)
+        data.p = p
+        table.insert(list, data)
+        batch(S)
+    end
+
+    local function build(S)
+        local model, cf = S.model, S.cf
+
+        -- Backing plate for the image bonus (plate 0.99 so the decal stays visible).
+        local plate = mk(cf, Vector3.new(7, 7.6, 0.1), nil, GLOW_SOFT, 0.99, model)
+        plate.Name = "SF_Plate"
+        S.plate = plate
+        for _, nf in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+            local d = Instance.new("Decal")
+            d.Name = "PortalImage"
+            d.Texture = IMG
+            d.Face = nf
+            d.Transparency = 0.2
+            d.Parent = plate
+            table.insert(S.decals, d)
         end
 
-        local function liquidFill()
-            local rx = 3.4
-            local ry = 4.0
-            local step = 0.42
-            for y = -ry, ry, step do
-                for x = -rx, rx, step do
-                    local nx = x / rx
-                    local ny = y / ry
-                    local rr = math.sqrt(nx * nx + ny * ny)
-                    if rr <= 1 then
-                        local col, tr, sz
-                        if rr > 0.82 then
-                            col = Color3.fromRGB(18, 118, 40)
-                            tr = 0.08
-                            sz = 0.58
-                        elseif rr > 0.60 then
-                            col = Color3.fromRGB(38, 172, 46)
-                            tr = 0.04
-                            sz = 0.62
-                        elseif rr > 0.35 then
-                            col = Color3.fromRGB(92, 218, 58)
-                            tr = 0.03
-                            sz = 0.64
-                        else
-                            col = Color3.fromRGB(190, 255, 145)
-                            tr = 0.06
-                            sz = 0.66
-                        end
-                        local p = spawnBall(sz, col, tr)
-                        p.Parent = face
-                        add(staticList, p, CFrame.new(x, y, 0.05), { baseTr = tr, phase = x * 1.3 + y * 0.9, isLiquid = true })
+        local aura = mk(cf * CFrame.new(0, 0, -0.5), Vector3.new(8.8, 8.8, 8.8), Enum.PartType.Ball, GLOW_SOFT, 0.9, model)
+        aura.Name = "SF_Aura"
+        S.aura = aura
+
+        -- Dense liquid body filling the whole oval.
+        local rx, ry, step = 3.4, 4.0, 0.5
+        for y = -ry, ry, step do
+            for x = -rx, rx, step do
+                local rr = math.sqrt((x / rx) ^ 2 + (y / ry) ^ 2)
+                if rr <= 1.02 then
+                    local col, tr, sz
+                    if rr > 0.82 then
+                        col, tr, sz = Color3.fromRGB(18, 118, 40), 0.08, 0.72
+                    elseif rr > 0.6 then
+                        col, tr, sz = Color3.fromRGB(38, 172, 46), 0.04, 0.74
+                    elseif rr > 0.35 then
+                        col, tr, sz = Color3.fromRGB(92, 218, 58), 0.03, 0.76
+                    else
+                        col, tr, sz = Color3.fromRGB(190, 255, 145), 0.05, 0.78
                     end
+                    local p = mk(cf, Vector3.new(sz, sz, sz), Enum.PartType.Ball, col, tr, model)
+                    reg(S, S.liquid, p, { pos = Vector3.new(x, y, 0.05), tr = tr, phase = x * 1.3 + y * 0.9 })
                 end
             end
         end
-        liquidFill()
 
+        -- Bright rim with a chasing highlight.
         for i = 1, 44 do
             local a = (i - 1) / 44 * math.pi * 2
-            local px = math.cos(a) * 4.3
-            local py = math.sin(a) * 4.7
-            local tx = -math.sin(a) * 4.3
-            local ty = math.cos(a) * 4.7
-            local p = Instance.new("Part")
-            p.Size = Vector3.new(0.22, 0.22, 0.85)
-            p.Anchored = true
-            p.CanCollide = false
-            p.Material = Enum.Material.Neon
-            p.Color = (i % 2 == 0) and GLOW_SOFT or GLOW
-            p.Transparency = 0
-            p.Parent = face
-            local pos = Vector3.new(px, py, 0.1)
-            add(staticList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)), { isRim = true })
+            local pos = Vector3.new(math.cos(a) * 4.3, math.sin(a) * 4.7, 0.1)
+            local dir = Vector3.new(-math.sin(a) * 4.3, math.cos(a) * 4.7, 0).Unit
+            local p = mk(cf, Vector3.new(0.22, 0.22, 0.85), nil, GLOW, 0, model)
+            reg(S, S.rim, p, { pos = pos, dir = dir, i = i })
         end
 
+        -- Outer corona.
         for i = 1, 24 do
             local a = (i - 1) / 24 * math.pi * 2
-            local px = math.cos(a) * 4.9
-            local py = math.sin(a) * 5.3
-            local p = spawnBall(0.34, GLOW_SOFT, 0.25)
-            p.Parent = face
-            add(coronaList, p, CFrame.new(px, py, 0.02), { phase = a * 2 })
+            local pos = Vector3.new(math.cos(a) * 4.9, math.sin(a) * 5.3, 0.02)
+            local p = mk(cf, Vector3.new(0.34, 0.34, 0.34), Enum.PartType.Ball, GLOW_SOFT, 0.25, model)
+            reg(S, S.corona, p, { pos = pos, phase = a * 2 })
         end
 
+        -- Dark vortex arms.
         for arm = 1, 3 do
             local base = (arm - 1) / 3 * math.pi * 2
             for j = 1, 12 do
                 local t = j / 12
-                local a = base + t * 2.7
-                local r = 0.5 + t * 3.5
-                local px = math.cos(a) * r
-                local py = math.sin(a) * r * 1.09
-                local tx = -math.sin(a) * r
-                local ty = math.cos(a) * r * 1.09
-                local p = Instance.new("Part")
-                p.Size = Vector3.new(0.18, 0.18, 2.6 - t * 1.8)
-                p.Anchored = true
-                p.CanCollide = false
-                p.Material = Enum.Material.Neon
-                p.Color = DARK_VORTEX
-                p.Transparency = 0.1
-                p.Parent = face
-                local pos = Vector3.new(px, py, 0.35)
-                add(mainList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
+                local p = mk(cf, Vector3.new(0.18, 0.18, 2.6 - t * 1.8), nil, DARK, 0.1, model)
+                reg(S, S.dark, p, { a0 = base + t * 2.7, r = 0.5 + t * 3.5, z = 0.35 })
             end
         end
 
+        -- Bright counter-swirl arms.
         for arm = 1, 3 do
             local base = (arm - 1) / 3 * math.pi * 2
             for j = 1, 8 do
                 local t = j / 8
-                local a = base + t * 2.3
-                local r = 0.35 + t * 2.0
-                local px = math.cos(a) * r
-                local py = math.sin(a) * r * 1.09
-                local tx = -math.sin(a) * r
-                local ty = math.cos(a) * r * 1.09
-                local p = Instance.new("Part")
-                p.Size = Vector3.new(0.14, 0.14, 1.8 - t * 1.1)
-                p.Anchored = true
-                p.CanCollide = false
-                p.Material = Enum.Material.Neon
-                p.Color = GLOW_SOFT
-                p.Transparency = 0.12
-                p.Parent = face
-                local pos = Vector3.new(px, py, 0.30)
-                add(innerList, p, CFrame.new(pos, pos + Vector3.new(tx, ty, 0)))
+                local p = mk(cf, Vector3.new(0.14, 0.14, 1.8 - t * 1.1), nil, GLOW_SOFT, 0.12, model)
+                reg(S, S.inner, p, { a0 = base + t * 2.3, r = 0.35 + t * 2.0, z = 0.30 })
             end
         end
 
-        local core = spawnBall(1.55, Color3.fromRGB(200, 255, 150), 0.05)
-        core.Parent = face
-        add(coreList, core, CFrame.new(0, 0, 0.12), { baseSize = 1.55, phase = 0 })
+        -- Pulsating energy core.
+        local c1 = mk(cf, Vector3.new(1.55, 1.55, 1.55), Enum.PartType.Ball, Color3.fromRGB(200, 255, 150), 0.05, model)
+        reg(S, S.core, c1, { base = 1.55, phase = 0, z = 0.12 })
+        local c2 = mk(cf, Vector3.new(0.85, 0.85, 0.85), Enum.PartType.Ball, Color3.fromRGB(120, 235, 70), 0.1, model)
+        reg(S, S.core, c2, { base = 0.85, phase = 1.7, z = 0.18 })
 
-        local core2 = spawnBall(0.85, Color3.fromRGB(120, 235, 70), 0.10)
-        core2.Parent = face
-        add(coreList, core2, CFrame.new(0, 0, 0.18), { baseSize = 0.85, phase = 1.7 })
-
+        -- Small inner ring that turns slowly.
         for i = 1, 12 do
             local a = (i - 1) / 12 * math.pi * 2
-            local px = math.cos(a) * 1.9
-            local py = math.sin(a) * 2.07
-            local p = spawnBall(0.22, GLOW, 0.18)
-            p.Parent = face
-            add(staticList, p, CFrame.new(px, py, 0.08), { isInnerRing = true, phase = a })
+            local p = mk(cf, Vector3.new(0.22, 0.22, 0.22), Enum.PartType.Ball, GLOW, 0.18, model)
+            reg(S, S.ring, p, { a0 = a })
         end
 
-        return { main = mainList, inner = innerList, static = staticList, core = coreList, corona = coronaList }
+        S.built = true
     end
 
-    local function burst(center, count, inward)
-        for _ = 1, (count or 12) do
-            task.spawn(function()
-                local p = spawnBall(RNG:NextNumber(0.18, 0.32))
-                p.CFrame = center * CFrame.new(
-                    RNG:NextNumber(-2.5, 2.5),
-                    RNG:NextNumber(-3, 3),
-                    RNG:NextNumber(-0.4, 0.4)
-                )
-                local target = center.Position
-                local dir
-                if inward then
-                    dir = (target - p.Position).Unit
-                else
-                    dir = Vector3.new(
-                        RNG:NextNumber(-1, 1),
-                        RNG:NextNumber(-0.3, 1),
-                        RNG:NextNumber(-0.5, 0.5)
-                    ).Unit
-                end
-                local step = inward and 0.35 or 0.26
-                local t = 0
-                while t < 1.15 and p.Parent do
-                    t = t + 0.05
-                    p.CFrame = p.CFrame * CFrame.new(dir * step)
-                    p.Transparency = math.min(1, t / 1.15)
-                    task.wait(0.05)
-                end
-                if p.Parent then p:Destroy() end
-            end)
+    local function sc(v, k)
+        return Vector3.new(v.X * k, v.Y * k, v.Z)
+    end
+
+    -- Positions every piece from the anchor for the current frame.
+    local function place(S)
+        local a = S.anchor.CFrame
+        local k = S.k
+        local spin = S.t * 2.6
+
+        if S.k ~= S.lastK or not S.placed then
+            for _, e in ipairs(S.liquid) do
+                e.p.CFrame = a * CFrame.new(sc(e.pos, k))
+            end
+            S.placed = true
+            S.lastK = S.k
         end
-    end
 
-    local function orbit(center)
-        task.spawn(function()
-            local orbiters = {}
-            for i = 1, 12 do
-                orbiters[i] = {
-                    part = spawnBall(0.28),
-                    phase = (i - 1) / 12 * math.pi * 2,
-                    radius = RNG:NextNumber(4.6, 6.6),
-                    height = RNG:NextNumber(-3.2, 3.2),
-                    speed = RNG:NextNumber(1.5, 2.7),
-                }
-            end
-            local t = 0
-            while t < 3.2 and orbiters[1].part.Parent do
-                t = t + 0.05
-                for _, o in ipairs(orbiters) do
-                    if o.part.Parent then
-                        local a = o.phase + t * o.speed
-                        o.part.CFrame = CFrame.new(center.Position + Vector3.new(
-                            math.cos(a) * o.radius,
-                            o.height,
-                            math.sin(a) * o.radius
-                        ))
-                        o.part.Transparency = math.min(1, o.part.Transparency + 0.018)
-                    end
-                end
-                task.wait(0.05)
-            end
-            for _, o in ipairs(orbiters) do
-                if o.part.Parent then o.part:Destroy() end
-            end
-        end)
-    end
+        for _, e in ipairs(S.rim) do
+            local p = sc(e.pos, k)
+            e.p.CFrame = a * CFrame.lookAt(p, p + e.dir)
+            local w = 0.5 + 0.5 * math.sin(S.t * 5 - e.i * 0.5)
+            e.p.Color = GLOW_SOFT:Lerp(HOT, w)
+        end
 
-    local function embers(center)
-        for _ = 1, 7 do
-            task.spawn(function()
-                local p = spawnBall(RNG:NextNumber(0.16, 0.26))
-                p.CFrame = center * CFrame.new(
-                    RNG:NextNumber(-2.4, 2.4),
-                    -4,
-                    RNG:NextNumber(-0.3, 0.3)
-                )
-                local rise = RNG:NextNumber(0.12, 0.22)
-                local t = 0
-                while t < 1.5 and p.Parent do
-                    t = t + 0.04
-                    p.CFrame = p.CFrame * CFrame.new(0, rise, 0)
-                    p.Transparency = math.min(1, 0.15 + t / 1.5)
-                    task.wait(0.04)
-                end
-                if p.Parent then p:Destroy() end
-            end)
+        for _, e in ipairs(S.dark) do
+            local ang = e.a0 + spin
+            local p = Vector3.new(math.cos(ang) * e.r * k, math.sin(ang) * e.r * 1.09 * k, e.z)
+            local tan = Vector3.new(-math.sin(ang), math.cos(ang) * 1.09, 0)
+            e.p.CFrame = a * CFrame.lookAt(p, p + tan)
+        end
+
+        for _, e in ipairs(S.inner) do
+            local ang = e.a0 - spin * 1.7
+            local p = Vector3.new(math.cos(ang) * e.r * k, math.sin(ang) * e.r * 1.09 * k, e.z)
+            local tan = Vector3.new(-math.sin(ang), math.cos(ang) * 1.09, 0)
+            e.p.CFrame = a * CFrame.lookAt(p, p + tan)
+        end
+
+        for _, e in ipairs(S.ring) do
+            local ang = e.a0 + spin * 0.35
+            e.p.CFrame = a * CFrame.new(math.cos(ang) * 1.9 * k, math.sin(ang) * 2.07 * k, 0.08)
+        end
+
+        for _, e in ipairs(S.corona) do
+            local wob = math.sin(S.t * 2.1 + e.phase) * 0.12
+            local p = Vector3.new(e.pos.X * k + wob, e.pos.Y * k + wob * 0.6, e.pos.Z)
+            e.p.CFrame = a * CFrame.new(p)
+            e.p.Transparency = math.clamp(0.25 + math.sin(S.t * 2.6 + e.phase) * 0.15, 0, 1)
+        end
+
+        for _, e in ipairs(S.core) do
+            local s = e.base * (1 + math.sin(S.t * 3.2 + e.phase) * 0.14 + S.corePulse) * math.max(k, 0.02)
+            e.p.Size = Vector3.new(s, s, s)
+            e.p.CFrame = a * CFrame.new(0, 0, e.z)
+            e.p.Transparency = 0.05 + math.sin(S.t * 2.8 + e.phase) * 0.04
+        end
+
+        if S.aura and S.aura.Parent then
+            local s = 8.8 * (1 + math.sin(S.t * 1.9) * 0.05) * math.max(k, 0.02)
+            S.aura.Size = Vector3.new(s, s, s)
+            S.aura.CFrame = a * CFrame.new(0, 0, -0.5)
+            S.aura.Transparency = math.clamp(0.9 + math.sin(S.t * 2.2) * 0.03, 0, 1)
         end
     end
 
-    local function bolt(center)
-        task.spawn(function()
-            local segs = RNG:NextNumber(4, 6)
-            local startPos = center.Position
-            local angle = RNG:NextNumber(0, math.pi * 2)
-            local radius = RNG:NextNumber(2.2, 4.2)
-            local endPos = startPos + Vector3.new(math.cos(angle) * radius, math.sin(angle) * radius * 1.09, 0)
-            local points = {}
-            points[1] = startPos
-            for i = 2, segs do
-                local t = (i - 1) / segs
-                local mid = startPos:Lerp(endPos, t)
-                mid = mid + Vector3.new(RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.2, 0.2))
-                points[i] = mid
-            end
-            points[segs + 1] = endPos
-            local parts = {}
-            for i = 1, segs do
-                local a = points[i]
-                local b = points[i + 1]
-                local dir = b - a
-                local dist = dir.Magnitude
-                if dist > 0.05 then
-                    local p = Instance.new("Part")
-                    p.Size = Vector3.new(0.08, 0.08, dist)
-                    p.Anchored = true
-                    p.CanCollide = false
-                    p.Material = Enum.Material.Neon
-                    p.Color = Color3.fromRGB(200, 255, 180)
-                    p.Transparency = 0.05
-                    p.CFrame = CFrame.new(a, b) * CFrame.new(0, 0, -dist / 2)
-                    p.Parent = workspace
-                    table.insert(parts, p)
-                end
-            end
-            task.wait(0.12)
-            for _, pr in ipairs(parts) do
-                if pr.Parent then pr:Destroy() end
-            end
-        end)
+    local function addFx(S, f)
+        f.age = 0
+        table.insert(S.fx, f)
     end
 
-    local function shimmerBurst(center)
-        for _ = 1, 6 do
-            task.spawn(function()
-                local p = spawnBall(RNG:NextNumber(0.12, 0.22), Color3.fromRGB(210, 255, 170), 0.1)
-                p.CFrame = center * CFrame.new(RNG:NextNumber(-1.8, 1.8), RNG:NextNumber(-2.2, 2.2), RNG:NextNumber(-0.2, 0.2))
-                local vel = Vector3.new(RNG:NextNumber(-0.6, 0.6), RNG:NextNumber(-0.6, 0.6), 0)
-                local t = 0
-                while t < 0.9 and p.Parent do
-                    t = t + 0.04
-                    p.CFrame = p.CFrame * CFrame.new(vel * 0.12)
-                    p.Transparency = math.min(1, 0.1 + t)
-                    task.wait(0.04)
-                end
-                if p.Parent then p:Destroy() end
-            end)
+    local function roomFor(S, n)
+        return #S.fx + n <= FX_CAP
+    end
+
+    local function burst(S, n, inward)
+        if not S.alive or not roomFor(S, n) then return end
+        local a = S.anchor.CFrame
+        for _ = 1, n do
+            local pos = a:PointToWorldSpace(Vector3.new(RNG:NextNumber(-2.5, 2.5), RNG:NextNumber(-3, 3), RNG:NextNumber(-0.4, 0.4)))
+            local v
+            if inward then
+                v = (a.Position - pos).Unit * RNG:NextNumber(7, 10)
+            else
+                local dir = Vector3.new(RNG:NextNumber(-1, 1), RNG:NextNumber(-0.3, 1), RNG:NextNumber(-0.5, 0.5))
+                if dir.Magnitude < 0.1 then dir = Vector3.new(0, 1, 0) end
+                v = dir.Unit * RNG:NextNumber(5, 7)
+            end
+            local s = RNG:NextNumber(0.16, 0.3)
+            local p = mk(CFrame.new(pos), Vector3.new(s, s, s), Enum.PartType.Ball, GLOW, 0.05, S.model)
+            addFx(S, { p = p, kind = "burst", pos = pos, v = v, life = RNG:NextNumber(0.8, 1.1), drag = 2.2 })
         end
     end
 
-    local function energyPulse(center, inward)
-        task.spawn(function()
-            local ring = Instance.new("Part")
-            ring.Shape = Enum.PartType.Ball
-            ring.Size = Vector3.new(0.5, 0.5, 0.5)
-            ring.Anchored = true
-            ring.CanCollide = false
-            ring.Material = Enum.Material.Neon
-            ring.Color = GLOW
-            ring.Transparency = 0.15
-            ring.CFrame = center
-            ring.Parent = workspace
-            local t = 0
-            local maxS = inward and 0.5 or 9
-            local startS = inward and 9 or 0.5
-            while t < 1 and ring.Parent do
-                t = t + 0.05
-                local s = startS + (maxS - startS) * (inward and (1 - (1 - t) ^ 2) or (t ^ 0.7))
-                ring.Size = Vector3.new(s, s * 1.09, 0.4)
-                ring.Transparency = 0.15 + t * 0.85
-                task.wait(0.05)
-            end
-            if ring.Parent then ring:Destroy() end
-        end)
+    local function orbit(S)
+        if not roomFor(S, 12) then return end
+        for i = 1, 12 do
+            local p = mk(S.anchor.CFrame, Vector3.new(0.28, 0.28, 0.28), Enum.PartType.Ball, GLOW, 0, S.model)
+            addFx(S, {
+                p = p,
+                kind = "orbit",
+                phase = (i - 1) / 12 * math.pi * 2,
+                r = RNG:NextNumber(4.6, 6.6),
+                h = RNG:NextNumber(-3.2, 3.2),
+                speed = RNG:NextNumber(1.5, 2.7),
+                life = 3.0,
+            })
+        end
     end
 
-    local function flash(center)
-        task.spawn(function()
-            local plate = Instance.new("Part")
-            plate.Size = Vector3.new(11, 11, 0.3)
-            plate.Anchored = true
-            plate.CanCollide = false
-            plate.Material = Enum.Material.Neon
-            plate.Color = GLOW
-            plate.Transparency = 1
-            plate.CFrame = center
-            plate.Parent = workspace
-            local light = Instance.new("PointLight")
-            light.Color = GLOW
-            light.Brightness = 0
-            light.Range = 20
-            light.Parent = plate
-            local t = 0
-            while t < 0.6 and plate.Parent do
-                t = t + 0.03
-                local a = math.clamp(1 - math.abs(t - 0.22) / 0.22, 0, 1)
-                plate.Transparency = 1 - a * 0.85
-                light.Brightness = a * 7
-                task.wait(0.03)
-            end
-            if plate.Parent then plate:Destroy() end
-        end)
+    local function embers(S, n)
+        local a = S.anchor.CFrame
+        for _ = 1, n do
+            if not roomFor(S, 1) then return end
+            local pos = a:PointToWorldSpace(Vector3.new(RNG:NextNumber(-2.4, 2.4), -4, RNG:NextNumber(-0.3, 0.3)))
+            local s = RNG:NextNumber(0.14, 0.24)
+            local p = mk(CFrame.new(pos), Vector3.new(s, s, s), Enum.PartType.Ball, LIME, 0.15, S.model)
+            addFx(S, {
+                p = p,
+                kind = "ember",
+                pos = pos,
+                v = Vector3.new(RNG:NextNumber(-0.4, 0.4), RNG:NextNumber(2.6, 3.8), 0),
+                life = 1.5,
+                drag = 0.6,
+            })
+        end
     end
 
-    local function ambient(face, glow, halo, frontImage, center, assembly, instant)
-        task.spawn(function()
-            local t = 0
-            local spin = 0
-            local grow = instant and 1 or 0
-            local nextEmbers = 0.4
-            local nextBolt = 0.7
-            local nextShimmer = 0.5
-            local nextPulse = 1.2
-            local function place(list, delta)
-                for _, entry in ipairs(list) do
-                    if entry.part.Parent then
-                        local sc = entry.cf
-                        local scaled = CFrame.new(sc.Position * grow) * (sc - sc.Position)
-                        entry.part.CFrame = face.CFrame * CFrame.Angles(0, 0, delta) * scaled
-                    end
-                end
-            end
-            if instant then
-                place(assembly.main, 0)
-                place(assembly.inner, 0)
-                place(assembly.static, 0)
-                place(assembly.corona, 0)
-                for _, entry in ipairs(assembly.core) do
-                    if entry.part.Parent then
-                        entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
-                    end
-                end
-                assembly.staticDone = true
-            end
-            while face.Parent do
-                if config.Animations then
-                    t = t + 0.05
-                    spin = spin + 0.13
-                    if not instant then
-                        grow = math.min(1, grow + 0.06)
-                    end
-                    place(assembly.main, spin)
-                    place(assembly.inner, -spin * 1.7)
-                    if not instant then
-                        if grow < 1 then
-                            place(assembly.static, 0)
-                            place(assembly.corona, 0)
-                        elseif not assembly.staticDone then
-                            place(assembly.static, 0)
-                            place(assembly.corona, 0)
-                            assembly.staticDone = true
-                        end
-                    end
-                    for _, entry in ipairs(assembly.core) do
-                        if entry.part.Parent then
-                            local s = entry.baseSize * (1 + math.sin(t * 3.2 + entry.phase) * 0.14)
-                            entry.part.Size = Vector3.new(s, s, s)
-                            if not instant then
-                                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position * grow)
-                            else
-                                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
-                            end
-                            entry.part.Transparency = 0.05 + math.sin(t * 2.8 + entry.phase) * 0.04
-                        end
-                    end
-                    for _, entry in ipairs(assembly.corona) do
-                        if entry.part.Parent then
-                            local base = entry.cf.Position
-                            local wob = math.sin(t * 2.1 + entry.phase) * 0.12
-                            local pos = instant and (base + Vector3.new(wob, wob * 0.6, 0)) or (base * grow + Vector3.new(wob, wob * 0.6, 0))
-                            entry.part.CFrame = face.CFrame * CFrame.new(pos)
-                            entry.part.Transparency = 0.25 + math.sin(t * 2.6 + entry.phase) * 0.15
-                        end
-                    end
-                    for _, entry in ipairs(assembly.static) do
-                        if entry.isLiquid and entry.part.Parent then
-                            entry.part.Transparency = math.clamp(entry.baseTr + math.sin(t * 2.4 + entry.phase) * 0.06, 0, 1)
-                        end
-                    end
-                    if glow.Parent then
-                        glow.Brightness = 5 + math.sin(t * 2.9) * 1.6
-                    end
-                    if halo and halo.Parent then
-                        halo.Brightness = 2 + math.sin(t * 1.7) * 0.7
-                    end
-                    if frontImage and frontImage.Parent then
-                        frontImage.Transparency = 0.05 + math.sin(t * 5.2) * 0.05
-                    end
-                    nextEmbers = nextEmbers - 0.05
-                    if nextEmbers <= 0 then
-                        nextEmbers = RNG:NextNumber(0.5, 1.0)
-                        embers(center)
-                    end
-                    nextBolt = nextBolt - 0.05
-                    if nextBolt <= 0 then
-                        nextBolt = RNG:NextNumber(0.6, 1.3)
-                        bolt(center)
-                    end
-                    nextShimmer = nextShimmer - 0.05
-                    if nextShimmer <= 0 then
-                        nextShimmer = RNG:NextNumber(0.7, 1.4)
-                        shimmerBurst(center)
-                    end
-                    nextPulse = nextPulse - 0.05
-                    if nextPulse <= 0 then
-                        nextPulse = RNG:NextNumber(1.8, 3.0)
-                        energyPulse(center, false)
-                    end
-                end
-                task.wait(0.05)
-            end
-        end)
+    -- Sparks streaming inward along spirals: the "vortex draw" effect.
+    local function spiral(S, n)
+        local a = S.anchor.CFrame
+        for _ = 1, n do
+            if not roomFor(S, 1) then return end
+            local s = RNG:NextNumber(0.14, 0.22)
+            local p = mk(a, Vector3.new(s, s, s), Enum.PartType.Ball, LIME, 0.1, S.model)
+            addFx(S, {
+                p = p,
+                kind = "spiral",
+                r0 = RNG:NextNumber(5.5, 7.5),
+                a0 = RNG:NextNumber(0, math.pi * 2),
+                w = RNG:NextNumber(2.5, 3.5),
+                z = RNG:NextNumber(-0.3, 0.6),
+                size = s,
+                life = RNG:NextNumber(1.2, 1.6),
+            })
+        end
     end
 
-    local function openPortal(cf, quiet)
-        cleanup()
-        local face = Instance.new("Part")
-        face.Name = "SF_Portal"
-        face.Size = Vector3.new(0.3, 0.3, 0.3)
-        face.Anchored = true
-        face.CanCollide = false
-        face.CanQuery = false
-        face.Material = Enum.Material.Plastic
-        face.Color = Color3.fromRGB(0, 0, 0)
-        face.Transparency = 0.99
-        face.CFrame = cf
-        face.Parent = workspace
-        lastPortal = face
+    local function glints(S, n)
+        local a = S.anchor.CFrame
+        for _ = 1, n do
+            if not roomFor(S, 1) then return end
+            local pos = a:PointToWorldSpace(Vector3.new(RNG:NextNumber(-3, 3), RNG:NextNumber(-3.8, 3.8), RNG:NextNumber(-0.2, 0.2)))
+            local s = RNG:NextNumber(0.12, 0.2)
+            local p = mk(CFrame.new(pos), Vector3.new(s, s, s), Enum.PartType.Ball, HOT, 0.1, S.model)
+            addFx(S, {
+                p = p,
+                kind = "glint",
+                pos = pos,
+                v = Vector3.new(RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.5, 0.5), 0),
+                life = 0.9,
+                drag = 1.5,
+            })
+        end
+    end
 
-        local decalFront = Instance.new("Decal")
-        decalFront.Name = "PortalImage"
-        decalFront.Texture = IMG
-        decalFront.Face = Enum.NormalId.Front
-        decalFront.Transparency = 0
-        decalFront.Parent = face
+    local function flash(S)
+        if not S.alive then return end
+        local plate = mk(S.anchor.CFrame, Vector3.new(11, 11, 0.3), nil, GLOW, 1, S.model)
+        local light = Instance.new("PointLight")
+        light.Color = GLOW
+        light.Brightness = 0
+        light.Range = 20
+        light.Parent = plate
+        addFx(S, { p = plate, kind = "flash", life = 0.45, light = light })
+    end
 
-        local decalBack = Instance.new("Decal")
-        decalBack.Name = "PortalImageBack"
-        decalBack.Texture = IMG
-        decalBack.Face = Enum.NormalId.Back
-        decalBack.Transparency = 0
-        decalBack.Parent = face
+    -- Quick lightning: a short zigzag from the core to the rim.
+    local function bolt(S)
+        if not S.ready or #S.bolts >= 2 or not S.alive then return end
+        local a = S.anchor.CFrame
+        local ang = RNG:NextNumber(0, math.pi * 2)
+        local rad = RNG:NextNumber(2.4, 4.4)
+        local segs = RNG:NextInteger(4, 6)
+        local pts = {}
+        for i = 0, segs do
+            local u = i / segs
+            local lp = Vector3.new(0, 0, 0.4):Lerp(Vector3.new(math.cos(ang) * rad, math.sin(ang) * rad * 1.09, 0.4), u)
+            if i > 0 and i < segs then
+                lp = lp + Vector3.new(RNG:NextNumber(-0.5, 0.5), RNG:NextNumber(-0.5, 0.5), 0)
+            end
+            pts[#pts + 1] = a:PointToWorldSpace(lp)
+        end
+        local parts = {}
+        for i = 1, #pts - 1 do
+            local p0, p1 = pts[i], pts[i + 1]
+            local d = (p1 - p0).Magnitude
+            if d > 0.05 then
+                local p = mk(CFrame.new(p0, p1) * CFrame.new(0, 0, -d / 2), Vector3.new(0.07, 0.07, d), nil, HOT, 0.05, S.model)
+                table.insert(parts, p)
+            end
+        end
+        table.insert(S.bolts, { parts = parts, age = 0, life = 0.16 })
+    end
 
-        lastImages.front = decalFront
-        lastImages.back = decalBack
+    local function updateBolts(S, dt)
+        local keep = {}
+        for _, b in ipairs(S.bolts) do
+            b.age = b.age + dt
+            if b.age >= b.life then
+                for _, p in ipairs(b.parts) do safeDestroy(p) end
+            else
+                local tr = math.clamp(b.age / b.life, 0, 1) * 0.9
+                for _, p in ipairs(b.parts) do
+                    if p.Parent then p.Transparency = tr end
+                end
+                table.insert(keep, b)
+            end
+        end
+        S.bolts = keep
+    end
 
-        local glow = Instance.new("PointLight")
-        glow.Color = GLOW
-        glow.Brightness = 5
-        glow.Range = 18
-        glow.Parent = face
+    local function updateFx(S, dt)
+        local a = S.anchor.CFrame
+        local keep = {}
+        for _, f in ipairs(S.fx) do
+            f.age = f.age + dt
+            if f.age >= f.life or not f.p.Parent then
+                safeDestroy(f.p)
+            else
+                local u = f.age / f.life
+                if f.kind == "burst" or f.kind == "ember" or f.kind == "glint" then
+                    f.pos = f.pos + f.v * dt
+                    f.v = f.v * (1 - (f.drag or 2.2) * dt)
+                    f.p.CFrame = CFrame.new(f.pos)
+                    f.p.Transparency = math.clamp(u * 0.9, 0, 1)
+                elseif f.kind == "orbit" then
+                    local ang = f.phase + f.age * f.speed
+                    local c = S.anchor.Position
+                    f.p.CFrame = CFrame.new(c + Vector3.new(math.cos(ang) * f.r, f.h, math.sin(ang) * f.r))
+                    f.p.Transparency = math.clamp(u * 0.9, 0, 1)
+                elseif f.kind == "spiral" then
+                    local r = f.r0 * (1 - u) ^ 1.3
+                    local ang = f.a0 + f.age * f.w
+                    f.p.CFrame = a * CFrame.new(math.cos(ang) * r, math.sin(ang) * r * 1.09, f.z)
+                    local s = f.size * (1 - u * 0.6)
+                    f.p.Size = Vector3.new(s, s, s)
+                    f.p.Transparency = math.clamp(0.1 + u * 0.8, 0, 1)
+                elseif f.kind == "flash" then
+                    local ai = math.clamp(1 - math.abs(f.age - 0.12) / 0.12, 0, 1)
+                    f.p.Transparency = 1 - ai * 0.85
+                    f.light.Brightness = ai * 7
+                end
+                table.insert(keep, f)
+            end
+        end
+        S.fx = keep
+    end
 
-        local halo = Instance.new("PointLight")
-        halo.Color = GLOW_SOFT
-        halo.Brightness = 2
-        halo.Range = 32
-        halo.Parent = face
+    local function update(S, dt)
+        S.t = S.t + dt
+        S.frame = S.frame + 1
 
-        if not quiet then
-            playSound(OPEN_SOUND, 1, face)
-            flash(cf)
-            burst(cf, 18)
-            orbit(cf)
-            energyPulse(cf, false)
+        if S.mode == "open" then
+            S.grow = math.min(1, S.grow + dt / OPEN_TIME)
+            S.k = 1 - (1 - S.grow) ^ 3
+            if S.grow >= 1 then S.mode = "hold" end
+        elseif S.mode == "close" then
+            S.closeT = S.closeT + dt
+            local g = math.max(0, 1 - S.closeT / CLOSE_TIME)
+            S.k = S.closeFrom * g * g
+            if S.closeT >= CLOSE_TIME then
+                return false
+            end
+        end
+
+        S.corePulse = math.max(0, S.corePulse - dt * 1.2)
+        place(S)
+
+        local k = S.k
+        if S.frame % 3 == 0 then
+            for _, e in ipairs(S.liquid) do
+                e.p.Transparency = math.clamp(e.tr + math.sin(S.t * 2.4 + e.phase) * 0.06, 0, 1)
+            end
+        end
+
+        S.glow.Brightness = (5 + math.sin(S.t * 2.9) * 1.6) * k
+        S.halo.Brightness = (2 + math.sin(S.t * 1.7) * 0.7) * k
+        for _, d in ipairs(S.decals) do
+            d.Transparency = 0.2 + (1 - k) * 0.8
+        end
+
+        if config.Animations and S.mode ~= "close" then
+            S.nextSpiral = S.nextSpiral - dt
+            if S.nextSpiral <= 0 then
+                S.nextSpiral = 0.4
+                spiral(S, 2)
+            end
+            S.nextEmber = S.nextEmber - dt
+            if S.nextEmber <= 0 then
+                S.nextEmber = RNG:NextNumber(0.5, 1.0)
+                embers(S, 3)
+            end
+            S.nextBolt = S.nextBolt - dt
+            if S.nextBolt <= 0 then
+                S.nextBolt = RNG:NextNumber(0.6, 1.2)
+                bolt(S)
+            end
+            S.nextGlint = S.nextGlint - dt
+            if S.nextGlint <= 0 then
+                S.nextGlint = RNG:NextNumber(0.4, 0.8)
+                glints(S, 2)
+            end
+            S.nextPulse = S.nextPulse - dt
+            if S.nextPulse <= 0 then
+                S.nextPulse = RNG:NextNumber(2.0, 3.0)
+                S.corePulse = 0.3
+                burst(S, 4, true)
+            end
+        end
+
+        updateFx(S, dt)
+        updateBolts(S, dt)
+        return true
+    end
+
+    local function finalize(S)
+        S.alive = false
+        S.mode = "dead"
+        S.fx = {}
+        S.bolts = {}
+        safeDestroy(S.model)
+        if current == S then current = nil end
+    end
+
+    local function driver(S)
+        local last = os.clock()
+        while S.alive do
+            task.wait(FRAME)
+            if not S.alive then break end
+            local now = os.clock()
+            local dt = math.min(0.1, now - last)
+            last = now
+            local ok, keep = pcall(update, S, dt)
+            if not ok or keep == false then break end
+        end
+        finalize(S)
+    end
+
+    local function closeSession(S)
+        if not S or not S.alive or S.mode == "close" or S.mode == "dead" then return end
+        S.closeFrom = S.k
+        S.mode = "close"
+        S.closeT = 0
+        playSound(CLOSE_SOUND, S.anchor)
+        burst(S, 14, true)
+        flash(S)
+    end
+
+    local function cleanupNow()
+        if current then
+            local S = current
+            current = nil
+            S.alive = false
+            S.mode = "dead"
+            safeDestroy(S.model)
+        end
+        sweep()
+    end
+
+    local function openPortal(cf)
+        cleanupNow()
+        local S = newSession(cf, false)
+        current = S
+        task.spawn(function()
+            local ok = pcall(build, S)
+            if not ok or not S.alive then
+                finalize(S)
+                return
+            end
+            S.ready = true
+            playSound(OPEN_SOUND, S.anchor)
+            flash(S)
+            burst(S, 18, false)
+            orbit(S)
             task.delay(0.15, function()
-                if face.Parent then
-                    burst(cf, 10)
-                    shimmerBurst(cf)
+                if S.alive and S.mode ~= "close" then
+                    burst(S, 10, false)
+                    glints(S, 6)
                 end
             end)
-        end
-
-        lastAssembly = buildAssembly(face)
-
-        tween(face, TweenInfo.new(0.9, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = Vector3.new(7.0, 7.6, 0.3),
-        })
-
-        ambient(face, glow, halo, lastImages.front, cf, lastAssembly, false)
-
-        task.delay(12, function()
-            if face == lastPortal and face.Parent then
-                face:Destroy()
-                lastPortal = nil
-            end
+            driver(S)
         end)
-
-        return face
-    end
-
-    local function closePortal(face)
-        if not face or not face.Parent then return end
-        playSound(CLOSE_SOUND, 1, face)
-        burst(face.CFrame, 16, true)
-        energyPulse(face.CFrame, true)
-        flash(face.CFrame)
-        tween(face, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Size = Vector3.new(0.3, 0.3, 0.3),
-        })
-        for _, img in pairs({ lastImages.front, lastImages.back }) do
-            if img and img.Parent then
-                tween(img, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                    Transparency = 1,
-                })
-            end
-        end
-        if lastAssembly then
-            for _, listName in ipairs({ "main", "inner", "static", "core", "corona" }) do
-                local list = lastAssembly[listName]
-                if list then
-                    for _, entry in ipairs(list) do
-                        if entry.part.Parent then
-                            tween(entry.part, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                                Transparency = 1,
-                            })
-                        end
-                    end
-                end
-            end
-        end
-        task.delay(0.75, function()
-            if face.Parent then face:Destroy() end
-            if face == lastPortal then lastPortal = nil end
-        end)
+        return S
     end
 
     local function autoWalk(portalPos)
@@ -3646,9 +3653,10 @@ Portal = (function()
         local fwd = forwardVector()
         local pos = base + fwd * 7 + Vector3.new(0, 4.6, 0)
         local cf = CFrame.new(pos, pos + fwd)
-        openPortal(cf)
+        local S = openPortal(cf)
         setStatus("portal open — " .. MIN_OPEN .. "s (walk in for instant)")
         notify("Portal open — walk in to jump early", GLOW)
+
         local openedAt = os.clock()
         local entered = false
         local walking = false
@@ -3682,93 +3690,56 @@ Portal = (function()
             end
             task.wait(0.1)
         end
+
         if entered then
             setStatus("portal entered — teleporting now")
             notify("Portal entered!", GLOW)
-            local last = lastPortal
-            if last and last.Parent then
-                flash(last.CFrame)
-                burst(last.CFrame, 12)
-                energyPulse(last.CFrame, false)
-            end
         end
+
         if not hopStillActive(token) then
-            cleanup()
+            cleanupNow()
+            return
         end
+
+        -- Collapse the front portal BEFORE the teleport call, so no closing
+        -- animation runs during the loading screen (this was the lag).
+        closeSession(S)
+        local t0 = os.clock()
+        while S.alive and os.clock() - t0 < CLOSE_TIME + 0.3 do
+            task.wait(0.05)
+        end
+        cleanupNow()
     end
 
+    -- Arrival: portal already at full size behind the player (no opening
+    -- animation), stays briefly and then collapses.
     local function sealBehind()
-        local base = Vector3.new(0, 12, 0)
-        local r = root()
-        if r then base = r.Position end
-        local behind = -forwardVector()
-        local pos = base + behind * 5 + Vector3.new(0, 4.6, 0)
-        local cf = CFrame.new(pos, pos + behind)
-        cleanup()
-        local face = Instance.new("Part")
-        face.Name = "SF_Portal"
-        face.Size = Vector3.new(7.0, 7.6, 0.3)
-        face.Anchored = true
-        face.CanCollide = false
-        face.CanQuery = false
-        face.Material = Enum.Material.Plastic
-        face.Color = Color3.fromRGB(0, 0, 0)
-        face.Transparency = 0.99
-        face.CFrame = cf
-        face.Parent = workspace
-        lastPortal = face
-
-        local decalFront = Instance.new("Decal")
-        decalFront.Name = "PortalImage"
-        decalFront.Texture = IMG
-        decalFront.Face = Enum.NormalId.Front
-        decalFront.Transparency = 0
-        decalFront.Parent = face
-
-        local decalBack = Instance.new("Decal")
-        decalBack.Name = "PortalImageBack"
-        decalBack.Texture = IMG
-        decalBack.Face = Enum.NormalId.Back
-        decalBack.Transparency = 0
-        decalBack.Parent = face
-
-        lastImages.front = decalFront
-        lastImages.back = decalBack
-
-        local glow = Instance.new("PointLight")
-        glow.Color = GLOW
-        glow.Brightness = 4
-        glow.Range = 16
-        glow.Parent = face
-
-        local halo = Instance.new("PointLight")
-        halo.Color = GLOW_SOFT
-        halo.Brightness = 1.5
-        halo.Range = 28
-        halo.Parent = face
-
-        lastAssembly = buildAssembly(face)
-        lastAssembly.staticDone = true
-        for _, listName in ipairs({ "main", "inner", "static", "corona" }) do
-            local list = lastAssembly[listName]
-            if list then
-                for _, entry in ipairs(list) do
-                    if entry.part.Parent then
-                        entry.part.CFrame = face.CFrame * entry.cf
-                    end
-                end
+        task.spawn(function()
+            local t0 = os.clock()
+            while guiAlive and not root() and os.clock() - t0 < 10 do
+                task.wait(0.2)
             end
-        end
-        for _, entry in ipairs(lastAssembly.core) do
-            if entry.part.Parent then
-                entry.part.CFrame = face.CFrame * CFrame.new(entry.cf.Position)
+            task.wait(1.2)
+            if not guiAlive then return end
+
+            local r = root()
+            local base = r and r.Position or Vector3.new(0, 12, 0)
+            local behind = -forwardVector()
+            local pos = base + behind * 5 + Vector3.new(0, 4.6, 0)
+            local cf = CFrame.new(pos, pos + behind)
+
+            cleanupNow()
+            local S = newSession(cf, true)
+            current = S
+            local ok = pcall(build, S)
+            if not ok or not S.alive then
+                finalize(S)
+                return
             end
-        end
-
-        ambient(face, glow, halo, lastImages.front, cf, lastAssembly, true)
-
-        task.delay(1.8, function()
-            closePortal(face)
+            S.ready = true
+            task.spawn(driver, S)
+            task.wait(1.8)
+            closeSession(S)
         end)
     end
 
@@ -3791,7 +3762,7 @@ Portal = (function()
     preloadImage()
 
     return {
-        cleanup = cleanup,
+        cleanup = cleanupNow,
         gate = gate,
         sealBehind = sealBehind,
     }
