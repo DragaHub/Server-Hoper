@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.22"
+local VERSION = "2.23"
 
 local guiAlive = true
 local isHopping = false
@@ -730,22 +730,91 @@ local GuiFX = (function()
         end)
     end
 
-    -- Small spray of squares from a button on click.
+    -- Mouse position converted into ScreenGui space. InputObject positions
+    -- are measured below the topbar, while this ScreenGui ignores the inset,
+    -- so the topbar height has to be added back (this fixes sparks that
+    -- appeared above the pointer).
+    local pointer = nil
+    local function topInset()
+        local ok, tl = pcall(function()
+            return (game:GetService("GuiService"):GetGuiInset())
+        end)
+        if ok and typeof(tl) == "Vector3" then return tl.Y end
+        return 36
+    end
+
+    local function pointerIn(gui)
+        if not pointer then return nil end
+        local p, s = gui.AbsolutePosition, gui.AbsoluteSize
+        if pointer.X >= p.X and pointer.X <= p.X + s.X and pointer.Y >= p.Y and pointer.Y <= p.Y + s.Y then
+            return pointer.X, pointer.Y
+        end
+        return nil
+    end
+
+    -- Sparks burst from the pointer when it sits on the button, else from the button centre.
     local function clickSpark(button)
         if not on() or not button.Parent then return end
-        local x, y = center(button)
+        local x, y = pointerIn(button)
+        if not x then x, y = center(button) end
         local color = P()
-        for i = 1, 8 do
-            local a = (i - 1) / 8 * math.pi * 2 + RNG:NextNumber(-0.2, 0.2)
-            local sp = RNG:NextNumber(90, 170)
+        for i = 1, 12 do
+            local a = (i - 1) / 12 * math.pi * 2 + RNG:NextNumber(-0.2, 0.2)
+            local sp = RNG:NextNumber(90, 190)
             particle(layer, {
                 x = x, y = y,
                 vx = math.cos(a) * sp, vy = math.sin(a) * sp,
-                drag = 2.5, life = RNG:NextNumber(0.35, 0.55),
-                size = RNG:NextInteger(3, 5), color = color,
+                drag = 2.5, life = RNG:NextNumber(0.35, 0.6),
+                size = RNG:NextInteger(3, 5),
+                color = (i % 3 == 0) and WHITE or color,
                 spin = RNG:NextNumber(-600, 600), fade = 1.5,
             })
         end
+    end
+
+    -- Expanding outline ring at the click point.
+    local function clickRing(button)
+        if not on() or not button.Parent then return end
+        local x, y = pointerIn(button)
+        if not x then x, y = center(button) end
+        local ring = Instance.new("Frame")
+        ring.AnchorPoint = Vector2.new(0.5, 0.5)
+        ring.Position = UDim2.fromOffset(x, y)
+        ring.Size = UDim2.fromOffset(8, 8)
+        ring.BackgroundTransparency = 1
+        ring.BorderSizePixel = 0
+        ring.ZIndex = 150
+        ring.Parent = layer
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = P()
+        stroke.Thickness = 2
+        stroke.Transparency = 0.1
+        stroke.Parent = ring
+        tween(ring, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(70, 70),
+        })
+        tween(stroke, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Transparency = 1,
+        })
+        task.delay(0.45, function() safeDestroy(ring) end)
+    end
+
+    -- Little sparks that drift off a button's edges while hovered (throttled).
+    local hoverLast = 0
+    local function hoverSpark(button)
+        if not on() or not button.Parent then return end
+        local now = os.clock()
+        if now - hoverLast < 0.12 then return end
+        hoverLast = now
+        local p, s = button.AbsolutePosition, button.AbsoluteSize
+        local x = p.X + RNG:NextNumber(0, 1) * s.X
+        local y = p.Y + (RNG:NextNumber() < 0.5 and 0 or s.Y)
+        particle(layer, {
+            x = x, y = y,
+            vx = RNG:NextNumber(-30, 30), vy = RNG:NextNumber(-70, -30),
+            drag = 0.5, life = RNG:NextNumber(0.4, 0.7),
+            size = RNG:NextInteger(2, 3), color = P(), alpha0 = 0.1, fade = 1.4,
+        })
     end
 
     -- Confetti rain from the top of the window on a match.
@@ -910,16 +979,52 @@ local GuiFX = (function()
         end)
     end
 
-    -- Cursor trail: tiny fading squares that follow the mouse.
+    -- Ambient glint that slides across the title bar every few seconds.
+    local function titleGlint(bar)
+        task.spawn(function()
+            while guiAlive and bar.Parent do
+                task.wait(RNG:NextNumber(3.5, 6))
+                if not (guiAlive and bar.Parent) then break end
+                if on() then
+                    local g = Instance.new("Frame")
+                    g.Size = UDim2.new(0, 26, 1, 0)
+                    g.Position = UDim2.new(-0.2, 0, 0, 0)
+                    g.BackgroundColor3 = P()
+                    g.BackgroundTransparency = 0.6
+                    g.BorderSizePixel = 0
+                    g.ZIndex = 45
+                    g.Parent = bar
+                    tween(g, TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        Position = UDim2.new(1.1, 0, 0, 0),
+                        BackgroundTransparency = 1,
+                    })
+                    task.delay(0.75, function() safeDestroy(g) end)
+                end
+            end
+        end)
+    end
+
+    -- Cursor trail: tiny fading squares that follow the mouse, plus the
+    -- corrected pointer position used by the click effects.
     local function cursorTrail()
+        local function track(input)
+            pointer = Vector2.new(input.Position.X, input.Position.Y + topInset())
+            return pointer
+        end
+        rememberConnection(UserInputService.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                track(input)
+            end
+        end))
         rememberConnection(UserInputService.InputChanged:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+            local p = track(input)
             if not on() then return end
             local now = os.clock()
             if now - trailLast < 0.05 then return end
             trailLast = now
             particle(layer, {
-                x = input.Position.X, y = input.Position.Y,
+                x = p.X, y = p.Y,
                 vx = 0, vy = 0, life = 0.35,
                 size = 3, color = P(), alpha0 = 0.3, fade = 1,
             })
@@ -937,6 +1042,8 @@ local GuiFX = (function()
         layer.ZIndex = 150
         layer.Parent = ScreenGui
         corners(frame)
+        local bar = frame:FindFirstChild("TitleBar")
+        if bar then titleGlint(bar) end
         startDust()
         cursorTrail()
     end
@@ -944,6 +1051,8 @@ local GuiFX = (function()
     return {
         attach = attach,
         clickSpark = clickSpark,
+        clickRing = clickRing,
+        hoverSpark = hoverSpark,
         confetti = confetti,
         errorBurst = errorBurst,
         hopSweep = hopSweep,
@@ -1026,6 +1135,7 @@ local function setupRetroButton(button)
 
     button.MouseEnter:Connect(function()
         setHover(true)
+        GuiFX.hoverSpark(button)
         sweepShine()
         tween(scale, TweenInfo.new(0.1, Enum.EasingStyle.Quad), { Scale = 1.04 })
     end)
@@ -1036,6 +1146,7 @@ local function setupRetroButton(button)
     button.MouseButton1Down:Connect(function()
         ripple()
         GuiFX.clickSpark(button)
+        GuiFX.clickRing(button)
         tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.92 })
     end)
     button.MouseButton1Up:Connect(function()
@@ -1838,7 +1949,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.22
+> SERVER FINDER v2.23
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
