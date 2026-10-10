@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.23"
+local VERSION = "2.24"
 
 local guiAlive = true
 local isHopping = false
@@ -663,10 +663,10 @@ local GuiFX = (function()
         if inst then pcall(function() inst:Destroy() end) end
     end
 
-    local function square(parent, size, color, tr)
+    local function square(parent, w, h, color, tr)
         local f = Instance.new("Frame")
         f.AnchorPoint = Vector2.new(0.5, 0.5)
-        f.Size = UDim2.fromOffset(size, size)
+        f.Size = UDim2.fromOffset(w, h)
         f.BackgroundColor3 = color
         f.BackgroundTransparency = tr
         f.BorderSizePixel = 0
@@ -681,7 +681,7 @@ local GuiFX = (function()
         liveCount = liveCount + 1
         task.spawn(function()
             local a0 = spec.alpha0 or 0
-            local f = square(parent, spec.size, spec.color, a0)
+            local f = square(parent, spec.w or spec.size, spec.h or spec.size, spec.color, a0)
             f.Rotation = spec.rot or 0
             local x, y, vx, vy = spec.x, spec.y, spec.vx, spec.vy
             local drag = spec.drag or 0
@@ -1004,19 +1004,116 @@ local GuiFX = (function()
         end)
     end
 
-    -- Cursor trail: tiny fading squares that follow the mouse, plus the
-    -- corrected pointer position used by the click effects.
-    local function cursorTrail()
-        local function track(input)
-            pointer = Vector2.new(input.Position.X, input.Position.Y + topInset())
-            return pointer
+    -- Pointer calibration. While the pointer is over a button we know it lies
+    -- inside that button's rectangle, so we test which offset (raw or raw +
+    -- topbar) puts it there and keep that choice.
+    local hovered = nil
+    local pointerDY = nil
+    local function rectHas(gui, x, y)
+        local p, s = gui.AbsolutePosition, gui.AbsoluteSize
+        return x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y
+    end
+
+    local function track(input)
+        local raw = input.Position
+        local inset = topInset()
+        if hovered and hovered.Parent then
+            local rawIn = rectHas(hovered, raw.X, raw.Y)
+            local insetIn = rectHas(hovered, raw.X, raw.Y + inset)
+            if insetIn and not rawIn then
+                pointerDY = inset
+            elseif rawIn and not insetIn then
+                pointerDY = 0
+            end
         end
+        pointer = Vector2.new(raw.X, raw.Y + (pointerDY or inset))
+        return pointer
+    end
+
+    local function setHovered(button, state)
+        if state then
+            hovered = button
+        elseif hovered == button then
+            hovered = nil
+        end
+    end
+
+    -- Hold a button: particles stream into its centre until release.
+    local charge = nil
+    local function chargeStart(button)
+        if not on() then return end
+        local token = {}
+        charge = token
+        task.spawn(function()
+            local t = 0
+            while charge == token and guiAlive and button.Parent and t < 1.2 do
+                local dt = task.wait(1 / 30)
+                t = t + dt
+                local x, y = pointerIn(button)
+                if not x then x, y = center(button) end
+                local a = RNG:NextNumber(0, math.pi * 2)
+                local r = RNG:NextNumber(40, 64)
+                local life = 0.3
+                particle(layer, {
+                    x = x + math.cos(a) * r, y = y + math.sin(a) * r,
+                    vx = -math.cos(a) * r / life, vy = -math.sin(a) * r / life,
+                    life = life, size = RNG:NextInteger(2, 3),
+                    color = RNG:NextNumber() < 0.3 and WHITE or P(), alpha0 = 0.2, fade = 1,
+                })
+            end
+            if charge == token then charge = nil end
+        end)
+    end
+
+    local function chargeStop()
+        charge = nil
+    end
+
+    -- Sparks rising or falling from the pointer on mouse-wheel scroll.
+    local function wheelTick(input, p)
+        if not on() then return end
+        local dir = input.Position.Z > 0 and -1 or 1
+        for _ = 1, 5 do
+            particle(layer, {
+                x = p.X, y = p.Y,
+                vx = RNG:NextNumber(-60, 60), vy = dir * RNG:NextNumber(40, 120),
+                drag = 1.5, life = RNG:NextNumber(0.3, 0.5),
+                size = 2, color = P(), alpha0 = 0.2, fade = 1.3,
+            })
+        end
+    end
+
+    -- Falling data-rain streaks across the screen (retro terminal feel).
+    local function startRain()
+        task.spawn(function()
+            while guiAlive do
+                task.wait(0.22)
+                if on() and layer and layer.Parent and liveCount < FX_CAP - 20 then
+                    local size = vp()
+                    particle(layer, {
+                        x = RNG:NextNumber(0, size.X), y = -20,
+                        vx = 0, vy = RNG:NextNumber(160, 300),
+                        life = RNG:NextNumber(2.2, 3.4),
+                        w = 2, h = RNG:NextInteger(10, 22), size = 2,
+                        color = P(), alpha0 = 0.85, fade = 1,
+                    })
+                end
+            end
+        end)
+    end
+
+    -- Cursor trail, pointer tracking, wheel and hold effects.
+    local function cursorTrail()
         rememberConnection(UserInputService.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 track(input)
             end
         end))
         rememberConnection(UserInputService.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseWheel then
+                if pointer then wheelTick(input, pointer) end
+                return
+            end
             if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
             local p = track(input)
             if not on() then return end
@@ -1045,6 +1142,7 @@ local GuiFX = (function()
         local bar = frame:FindFirstChild("TitleBar")
         if bar then titleGlint(bar) end
         startDust()
+        startRain()
         cursorTrail()
     end
 
@@ -1052,6 +1150,9 @@ local GuiFX = (function()
         attach = attach,
         clickSpark = clickSpark,
         clickRing = clickRing,
+        setHovered = setHovered,
+        chargeStart = chargeStart,
+        chargeStop = chargeStop,
         hoverSpark = hoverSpark,
         confetti = confetti,
         errorBurst = errorBurst,
@@ -1135,21 +1236,26 @@ local function setupRetroButton(button)
 
     button.MouseEnter:Connect(function()
         setHover(true)
+        GuiFX.setHovered(button, true)
         GuiFX.hoverSpark(button)
         sweepShine()
         tween(scale, TweenInfo.new(0.1, Enum.EasingStyle.Quad), { Scale = 1.04 })
     end)
     button.MouseLeave:Connect(function()
         setHover(false)
+        GuiFX.setHovered(button, false)
+        GuiFX.chargeStop()
         tween(scale, TweenInfo.new(0.12, Enum.EasingStyle.Back), { Scale = 1 })
     end)
     button.MouseButton1Down:Connect(function()
         ripple()
         GuiFX.clickSpark(button)
         GuiFX.clickRing(button)
+        GuiFX.chargeStart(button)
         tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.92 })
     end)
     button.MouseButton1Up:Connect(function()
+        GuiFX.chargeStop()
         tween(scale, TweenInfo.new(0.14, Enum.EasingStyle.Back), { Scale = hovered and 1.04 or 1 })
     end)
 end
@@ -1949,7 +2055,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.23
+> SERVER FINDER v2.24
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
