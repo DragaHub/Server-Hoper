@@ -22,7 +22,7 @@ local MAX_COUNTRY_LOOKUPS = 4
 local TARGET_CANDIDATES = 60
 local TELEPORT_TIMEOUT = 6
 local GUI_MIN_SCALE = 0.55
-local VERSION = "2.21"
+local VERSION = "2.22"
 
 local guiAlive = true
 local isHopping = false
@@ -634,6 +634,324 @@ local function tween(instance, info, props)
     return animation
 end
 
+-- ============================================================
+-- GUI 2D VFX
+-- Pure Frame/TextLabel effects on top of the retro GUI:
+--   ambient phosphor dust, click sparks on every button, cursor trail,
+--   confetti on a match, red shard burst + flash on errors, hop sweep
+--   line, typewriter + light wipe on toasts, HUD corner brackets.
+-- All effects share one capped particle pool and are skipped when
+-- Animations is off.
+-- ============================================================
+local GuiFX = (function()
+    local FX_CAP = 90
+    local liveCount = 0
+    local layer = nil
+    local trailLast = 0
+    local attached = false
+
+    local function on()
+        return guiAlive and config.Animations and ScreenGui.Parent ~= nil
+    end
+
+    local function vp()
+        local cam = workspace.CurrentCamera
+        return cam and cam.ViewportSize or Vector2.new(800, 600)
+    end
+
+    local function safeDestroy(inst)
+        if inst then pcall(function() inst:Destroy() end) end
+    end
+
+    local function square(parent, size, color, tr)
+        local f = Instance.new("Frame")
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
+        f.Size = UDim2.fromOffset(size, size)
+        f.BackgroundColor3 = color
+        f.BackgroundTransparency = tr
+        f.BorderSizePixel = 0
+        f.ZIndex = 150
+        f.Parent = parent
+        return f
+    end
+
+    -- One physics-driven piece; the pool cap keeps the GUI light.
+    local function particle(parent, spec)
+        if liveCount >= FX_CAP or not parent or not parent.Parent then return end
+        liveCount = liveCount + 1
+        task.spawn(function()
+            local a0 = spec.alpha0 or 0
+            local f = square(parent, spec.size, spec.color, a0)
+            f.Rotation = spec.rot or 0
+            local x, y, vx, vy = spec.x, spec.y, spec.vx, spec.vy
+            local drag = spec.drag or 0
+            local t = 0
+            local life = spec.life
+            while t < life and f.Parent and guiAlive do
+                local dt = task.wait(1 / 30)
+                t = t + dt
+                vy = (vy + (spec.g or 0) * dt) * (1 - drag * dt)
+                vx = vx * (1 - drag * dt)
+                x = x + vx * dt
+                y = y + vy * dt
+                f.Position = UDim2.fromOffset(x, y)
+                f.Rotation = f.Rotation + (spec.spin or 0) * dt
+                f.BackgroundTransparency = math.clamp(a0 + (1 - a0) * (t / life) ^ (spec.fade or 1), 0, 1)
+            end
+            liveCount = liveCount - 1
+            safeDestroy(f)
+        end)
+    end
+
+    local function center(gui)
+        local p, s = gui.AbsolutePosition, gui.AbsoluteSize
+        return p.X + s.X / 2, p.Y + s.Y / 2
+    end
+
+    -- Ambient phosphor dust drifting up the screen.
+    local function startDust()
+        task.spawn(function()
+            while guiAlive do
+                task.wait(0.45)
+                if on() and layer and layer.Parent then
+                    local size = vp()
+                    particle(layer, {
+                        x = RNG:NextNumber(0, size.X),
+                        y = size.Y + 4,
+                        vx = RNG:NextNumber(-8, 8),
+                        vy = RNG:NextNumber(-70, -35),
+                        life = RNG:NextNumber(4, 7),
+                        size = RNG:NextInteger(2, 3),
+                        color = P(),
+                        alpha0 = 0.8,
+                    })
+                end
+            end
+        end)
+    end
+
+    -- Small spray of squares from a button on click.
+    local function clickSpark(button)
+        if not on() or not button.Parent then return end
+        local x, y = center(button)
+        local color = P()
+        for i = 1, 8 do
+            local a = (i - 1) / 8 * math.pi * 2 + RNG:NextNumber(-0.2, 0.2)
+            local sp = RNG:NextNumber(90, 170)
+            particle(layer, {
+                x = x, y = y,
+                vx = math.cos(a) * sp, vy = math.sin(a) * sp,
+                drag = 2.5, life = RNG:NextNumber(0.35, 0.55),
+                size = RNG:NextInteger(3, 5), color = color,
+                spin = RNG:NextNumber(-600, 600), fade = 1.5,
+            })
+        end
+    end
+
+    -- Confetti rain from the top of the window on a match.
+    local function confetti(frame)
+        if not on() or not frame.Parent then return end
+        local p, s = frame.AbsolutePosition, frame.AbsoluteSize
+        local colors = { GREEN, P(), WHITE }
+        for _ = 1, 26 do
+            particle(layer, {
+                x = p.X + RNG:NextNumber(0.15, 0.85) * s.X,
+                y = p.Y + RNG:NextNumber(0, 0.2) * s.Y,
+                vx = RNG:NextNumber(-160, 160),
+                vy = RNG:NextNumber(-340, -180),
+                g = 520, drag = 0.8,
+                life = RNG:NextNumber(1.1, 1.8),
+                size = RNG:NextInteger(4, 7),
+                color = colors[RNG:NextInteger(1, 3)],
+                spin = RNG:NextNumber(-540, 540), fade = 2,
+            })
+        end
+    end
+
+    -- Red shards, horizontal glitch bars and a brief full-screen red flash.
+    local function errorBurst(frame)
+        if not on() or not frame.Parent then return end
+        local flashFrame = Instance.new("Frame")
+        flashFrame.Size = UDim2.new(1, 0, 1, 0)
+        flashFrame.BackgroundColor3 = RED
+        flashFrame.BackgroundTransparency = 0.8
+        flashFrame.BorderSizePixel = 0
+        flashFrame.ZIndex = 149
+        flashFrame.Parent = layer
+        tween(flashFrame, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 1,
+        })
+        task.delay(0.5, function() safeDestroy(flashFrame) end)
+
+        local x, y = center(frame)
+        for _ = 1, 16 do
+            local a = RNG:NextNumber(0, math.pi * 2)
+            local sp = RNG:NextNumber(120, 260)
+            particle(layer, {
+                x = x, y = y,
+                vx = math.cos(a) * sp, vy = math.sin(a) * sp - 60,
+                g = 300, drag = 1.5, life = RNG:NextNumber(0.5, 0.9),
+                size = RNG:NextInteger(2, 6), color = RED,
+                spin = RNG:NextNumber(-720, 720), fade = 1.2,
+            })
+        end
+
+        for _ = 1, 4 do
+            local bar = Instance.new("Frame")
+            bar.Size = UDim2.new(1, 0, 0, RNG:NextInteger(2, 4))
+            bar.Position = UDim2.new(0, 0, RNG:NextNumber(0.05, 0.95), 0)
+            bar.BackgroundColor3 = RED
+            bar.BackgroundTransparency = 0.35
+            bar.BorderSizePixel = 0
+            bar.ZIndex = 80
+            bar.Parent = frame
+            tween(bar, TweenInfo.new(0.18, Enum.EasingStyle.Linear), {
+                Position = UDim2.new(0, RNG:NextInteger(-18, 18), bar.Position.Y.Scale, 0),
+                BackgroundTransparency = 1,
+            })
+            task.delay(0.2, function() safeDestroy(bar) end)
+        end
+    end
+
+    -- Bright line that travels down the window when a hop starts.
+    local function hopSweep(frame)
+        if not on() or not frame.Parent then return end
+        for i = 1, 2 do
+            local bar = Instance.new("Frame")
+            bar.Size = UDim2.new(1, 0, 0, i == 1 and 3 or 1)
+            bar.Position = UDim2.new(0, 0, 0, -4)
+            bar.BackgroundColor3 = P()
+            bar.BackgroundTransparency = i == 1 and 0.45 or 0.75
+            bar.BorderSizePixel = 0
+            bar.ZIndex = 75
+            bar.Parent = frame
+            tween(bar, TweenInfo.new(0.9 + i * 0.15, Enum.EasingStyle.Linear), {
+                Position = UDim2.new(0, 0, 1, 4),
+            })
+            task.delay(1.4, function() safeDestroy(bar) end)
+        end
+    end
+
+    -- Typewriter reveal for toast text (uses MaxVisibleGraphemes).
+    local function typeIn(label)
+        if not on() then return end
+        local count = utf8.len(label.Text) or #label.Text
+        if count < 2 then return end
+        local step = math.max(1, math.ceil(count / 18))
+        label.MaxVisibleGraphemes = 0
+        task.spawn(function()
+            local i = 0
+            while i < count do
+                if not label.Parent then return end
+                i = math.min(count, i + step)
+                label.MaxVisibleGraphemes = i
+                task.wait(1 / 30)
+            end
+            if label.Parent then label.MaxVisibleGraphemes = -1 end
+        end)
+    end
+
+    -- Light streak wiping across a toast.
+    local function wipe(toast, color)
+        if not on() or not toast.Parent then return end
+        local streak = Instance.new("Frame")
+        streak.Size = UDim2.new(0, 36, 1, 0)
+        streak.Position = UDim2.new(-0.2, 0, 0, 0)
+        streak.BackgroundColor3 = color or P()
+        streak.BackgroundTransparency = 0.45
+        streak.BorderSizePixel = 0
+        streak.ZIndex = 102
+        streak.Parent = toast
+        tween(streak, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Position = UDim2.new(1.1, 0, 0, 0),
+            BackgroundTransparency = 1,
+        })
+        task.delay(0.5, function() safeDestroy(streak) end)
+    end
+
+    -- Breathing HUD corner brackets inside the window.
+    local function corners(frame)
+        local len = 12
+        local specs = {
+            { ax = 0, ay = 0, px = 3, py = 3 },
+            { ax = 1, ay = 0, px = -3, py = 3 },
+            { ax = 0, ay = 1, px = 3, py = -3 },
+            { ax = 1, ay = 1, px = -3, py = -3 },
+        }
+        local bars = {}
+        for _, s in ipairs(specs) do
+            for _, horizontal in ipairs({ true, false }) do
+                local b = Instance.new("Frame")
+                b.AnchorPoint = Vector2.new(s.ax, s.ay)
+                b.Position = UDim2.new(s.ax, s.px, s.ay, s.py)
+                b.Size = horizontal and UDim2.fromOffset(len, 2) or UDim2.fromOffset(2, len)
+                b.BorderSizePixel = 0
+                b.ZIndex = 70
+                b.Parent = frame
+                table.insert(bars, b)
+            end
+        end
+        task.spawn(function()
+            local t = 0
+            while guiAlive and frame.Parent do
+                t = t + 1 / 15
+                for i, b in ipairs(bars) do
+                    if b.Parent then
+                        b.BackgroundColor3 = P()
+                        if config.Animations then
+                            b.BackgroundTransparency = 0.2 + 0.5 * (0.5 + 0.5 * math.sin(t * 2 - i * 0.35))
+                        else
+                            b.BackgroundTransparency = 0.45
+                        end
+                    end
+                end
+                task.wait(1 / 15)
+            end
+        end)
+    end
+
+    -- Cursor trail: tiny fading squares that follow the mouse.
+    local function cursorTrail()
+        rememberConnection(UserInputService.InputChanged:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+            if not on() then return end
+            local now = os.clock()
+            if now - trailLast < 0.05 then return end
+            trailLast = now
+            particle(layer, {
+                x = input.Position.X, y = input.Position.Y,
+                vx = 0, vy = 0, life = 0.35,
+                size = 3, color = P(), alpha0 = 0.3, fade = 1,
+            })
+        end))
+    end
+
+    local function attach(frame)
+        if attached then return end
+        attached = true
+        layer = Instance.new("Frame")
+        layer.Name = "FXLayer"
+        layer.Size = UDim2.new(1, 0, 1, 0)
+        layer.BackgroundTransparency = 1
+        layer.BorderSizePixel = 0
+        layer.ZIndex = 150
+        layer.Parent = ScreenGui
+        corners(frame)
+        startDust()
+        cursorTrail()
+    end
+
+    return {
+        attach = attach,
+        clickSpark = clickSpark,
+        confetti = confetti,
+        errorBurst = errorBurst,
+        hopSweep = hopSweep,
+        typeIn = typeIn,
+        wipe = wipe,
+    }
+end)()
+
 local function setupRetroButton(button)
     local isImage = button:IsA("ImageButton")
     button.ClipsDescendants = true
@@ -717,6 +1035,7 @@ local function setupRetroButton(button)
     end)
     button.MouseButton1Down:Connect(function()
         ripple()
+        GuiFX.clickSpark(button)
         tween(scale, TweenInfo.new(0.05, Enum.EasingStyle.Quad), { Scale = 0.92 })
     end)
     button.MouseButton1Up:Connect(function()
@@ -1178,6 +1497,7 @@ tween(MainScale, TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection
 })
 pulseBorder(Main)
 attachScanline(Main)
+GuiFX.attach(Main)
 attachStaticOverlay(Main)
 
 local TitleBar = Instance.new("Frame")
@@ -1518,7 +1838,7 @@ InfoTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 InfoTextLabel.TextWrapped = true
 InfoTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 InfoTextLabel.Text = [[
-> SERVER FINDER v2.21
+> SERVER FINDER v2.22
 
 1. SMART AUTO-HOP
    Scans multiple API pages, scores candidates and
@@ -2001,6 +2321,8 @@ notify = function(message, color)
     toast.ZIndex = 100
     toast.ClipsDescendants = true
     toast.Parent = holder
+    GuiFX.typeIn(toast)
+    GuiFX.wipe(toast, accent)
 
     -- Accent stripe on the left edge that unfolds vertically.
     local stripe = Instance.new("Frame")
@@ -2681,6 +3003,7 @@ local function recycleVisitedIfStuck()
 end
 
 local function flashMatch()
+    GuiFX.confetti(Main)
     task.spawn(function()
         -- Celebration: border strobes green while the window does a happy bounce.
         if config.Animations and Main.Parent then
@@ -2785,6 +3108,7 @@ local function failHop(token, message, serverId)
     updateStats()
     notify(message, RED)
     shakeMain()
+    GuiFX.errorBurst(Main)
     retryAuto(token, 1.5)
 end
 
@@ -2805,6 +3129,7 @@ executeHop = function()
     end
 
     isHopping = true
+    GuiFX.hopSweep(Main)
     hopToken = hopToken + 1
     local token = hopToken
     sessionStats.lastHopStart = os.clock()
